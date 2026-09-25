@@ -10,4 +10,5 @@ set -a
 [ -f .env ] && . ./.env
 set +a
 MODEL="${OLLAMA_MODEL:-llama3.2:3b}"
-docker compose exec ollama ollama pull "$MODEL"
+# -T disables pseudo-TTY allocation so the pull works in non-interactive shells/CI.
+docker compose exec -T ollama ollama pull "$MODEL"

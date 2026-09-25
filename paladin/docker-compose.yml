@@ -54,6 +54,14 @@ services:
     networks: [internal]
     security_opt: ["no-new-privileges:true"]
     logging: *default-logging
+    # NOTE: `deploy.resources` is honored only by `docker stack deploy` (Swarm) and is
+    # IGNORED by plain `docker compose up`. The mem_limit/mem_reservation/cpus fields
+    # below are the ones the Docker engine actually enforces for `docker compose up`,
+    # which is how this stack is deployed on OCI. Both blocks are kept identical so the
+    # two deployment modes behave the same.
+    mem_limit: 2G
+    mem_reservation: 512M
+    cpus: "2.0"
     deploy:
       resources:
         limits:
@@ -78,6 +86,11 @@ services:
     networks: [internal]
     security_opt: ["no-new-privileges:true"]
     logging: *default-logging
+    # Enforced by plain `docker compose up` (deploy.resources is Swarm-only); kept
+    # identical to the deploy block below.
+    mem_limit: 512M
+    mem_reservation: 128M
+    cpus: "1.0"
     deploy:
       resources:
         limits:
@@ -112,6 +125,10 @@ services:
       start_period: 20s
     security_opt: ["no-new-privileges:true"]
     logging: *default-logging
+    # Enforced by plain `docker compose up` (deploy.resources is Swarm-only); kept
+    # identical to the deploy block below.
+    mem_limit: 512M
+    cpus: "1.0"
     deploy:
       resources:
         limits:
@@ -139,6 +156,11 @@ services:
       start_period: 20s
     security_opt: ["no-new-privileges:true"]
     logging: *default-logging
+    # Enforced by plain `docker compose up` (deploy.resources is Swarm-only); kept
+    # identical to the deploy block below.
+    mem_limit: 1G
+    mem_reservation: 256M
+    cpus: "1.0"
     deploy:
       resources:
         limits:
@@ -169,6 +191,12 @@ services:
       start_period: 30s
     security_opt: ["no-new-privileges:true"]
     logging: *default-logging
+    # Enforced by plain `docker compose up` (deploy.resources is Swarm-only); kept
+    # identical to the deploy block below. Ollama holds the 8G memory share of the
+    # 12 GB A1 budget but is capped at 2.0 CPUs so it cannot exceed the 2-OCPU shape.
+    mem_limit: 8G
+    mem_reservation: 1G
+    cpus: "2.0"
     deploy:
       # Sized against the standard OCI Always Free Ampere A1 budget (2 OCPUs /
       # 12 GB RAM per tenancy): llama3:8b needs ~4.7 GB resident before context,
@@ -177,7 +205,7 @@ services:
       # Larger allocations only apply with an explicit OCI entitlement.
       resources:
         limits:
-          cpus: "4.0"
+          cpus: "2.0"
           memory: 8G
         reservations:
           cpus: "0.5"

@@ -32,14 +32,20 @@ clearance-filtered vector store, then written to an audit trail. Nothing leaves 
 ```bash
 cd paladin
 cp .env.example .env          # then edit POSTGRES_PASSWORD
+chmod +x scripts/*.sh
 ./scripts/generate_rsa_keys.sh           # if keys/ is empty
 docker compose up -d --build
 
 # first run only: pull the model and build the retrieval index
 ./scripts/setup_ollama.sh # pulls "$OLLAMA_MODEL" inside the ollama container
-docker compose exec paladin-api python data/ingest.py
-docker compose exec paladin-api python -m gateway.db.seed
+docker compose exec -T paladin-api python data/ingest.py
+docker compose exec -T paladin-api python -m gateway.db.seed
 ```
+
+Prerequisites: Docker Engine + the Compose plugin, `bash` and `openssl` (for the
+key script). Provisioning needs egress to the container registries, the Ollama
+model library (`llama3` is a ~4.7 GB download) and Hugging Face (embedding
+model, cached in its named volume after the first run).
 
 * UI: <http://localhost:8501>
 * API docs (Swagger): <http://localhost:8000/docs>
@@ -188,6 +194,14 @@ stack - they will OOM Ollama and the embedding worker. The limits shipped
 in `docker-compose.yml` are the OCI sizing; they assume the 12 GB A1 shape
 above, not a 1 GB micro instance.
 
+> **Limits are ceilings, not reservations.** The per-service `mem_limit` values
+> sum to the 12 GB ceiling (2G + 512M + 512M + 1G + 8G = 12G) but cgroup limits
+> do not reserve host RAM - a container only uses what it touches, and nothing
+> is set aside for the OS. The sizing is safe because *observed* usage is far
+> lower (Ollama peaks ~5.6 GiB under its 8G cap, the other four services settle
+> at ~1 GB combined), which is what leaves the ~1-2 GB of real headroom for the
+> OS, the Docker engine, and the page cache.
+
 > **Measurement caveat.** Current memory measurements were taken on x86_64
 > using the Docker Desktop VM. The OCI target is native ARM64 Linux. After
 > deployment to the OCI VM, re-run the same `docker stats` + `ollama ps`
@@ -201,18 +215,30 @@ above, not a 1 GB micro instance.
 2. Install Docker + the compose plugin, copy the project, then:
    ```bash
    cd paladin
-   cp .env.example .env          # set POSTGRES_PASSWORD
+   cp .env.example .env          # set POSTGRES_PASSWORD; set OLLAMA_MODEL=llama3 for OCI/demo
+   chmod +x scripts/*.sh
    ./scripts/generate_rsa_keys.sh
    docker compose up -d --build
-   ./scripts/setup_ollama.sh   # pulls "$OLLAMA_MODEL"; large download
-   docker compose exec paladin-api python data/ingest.py
-   docker compose exec paladin-api python -m gateway.db.seed
+   ./scripts/setup_ollama.sh   # pulls "$OLLAMA_MODEL"; large download (~4.7 GB for llama3)
+   docker compose exec -T paladin-api python data/ingest.py
+   docker compose exec -T paladin-api python -m gateway.db.seed
    ```
-   Local development defaults to the small model (`OLLAMA_MODEL=llama3.2:3b`
-   in `.env`); the deployed/demo instance uses `OLLAMA_MODEL=llama3`.
+   The stack must be running before `setup_ollama.sh` (it shells into the
+   ollama container). Local development defaults to the small model
+   (`OLLAMA_MODEL=llama3.2:3b` in `.env`); the deployed/demo instance uses
+   `OLLAMA_MODEL=llama3`.
 3. Verify: `http://<vm-ip>:8000/health`, `http://<vm-ip>:8000/docs`, `http://<vm-ip>:8501`
    (open 8000/8501 in the subnet security list; keep postgres/chromadb/ollama unexposed -
    compose already publishes no ports for them).
 4. `docker compose ps` should show all five services healthy (Ollama reports healthy once
    the daemon answers `ollama list`, even before the model is pulled).
+
+> **First boot on ARM64.** ARM64 support is unverified until tested on the target.
+> On the OCI VM: (a) confirm multi-arch manifests with
+> `docker manifest inspect --verbose <image>` for `postgres:16.15`,
+> `chromadb/chroma:0.4.24` and `ollama/ollama:0.34.2` (expect `arm64` entries);
+> (b) `docker compose build` once; (c) during model load and a representative
+> RAG `/ask`, record `docker stats --no-stream` plus `docker compose exec -T ollama
+> ollama ps` and confirm the Ollama container stays comfortably under its 8G cap
+> with ~1-2 GB host headroom remaining before treating sizing as final.
 
