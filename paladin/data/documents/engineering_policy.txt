@@ -1,0 +1,10 @@
+Engineering Policy
+
+All employees must follow these guidelines:
+
+1. Access to engineering documents is granted based on clearance level.
+2. Level 1 employees can access public technical documentation.
+3. Level 2 employees can additionally access project specifications.
+4. Level 3 employees have access to all engineering documents including architecture decisions.
+
+Security protocols require that sensitive technical information is only shared within the appropriate clearance boundary.

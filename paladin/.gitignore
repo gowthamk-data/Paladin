@@ -1,0 +1,24 @@
+# --- secrets: never commit these -------------------------------------------------------------
+# .env holds POSTGRES_PASSWORD; keys/ holds the RSA key pair that signs every JWT.
+# Both are local-only and must never be committed. Generate them with
+# paladin/scripts/generate_rsa_keys.sh and `cp paladin/.env.example paladin/.env`.
+.env
+keys/
+
+# --- Python ----------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- local virtualenvs / tooling -------------------------------------------------------------
+.venv/
+venv/
+.idea/
+.vscode/
+.kilo/
+
+# --- runtime artefacts -----------------------------------------------------------------------
+*.log
