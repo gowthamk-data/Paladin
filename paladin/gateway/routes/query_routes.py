@@ -78,16 +78,33 @@ def get_embedding_model():
 
     `ask` runs inside the threadpool, so concurrent first requests can race here: the lock
     guarantees a single model instance per worker process instead of one per racing thread.
+
+    A load failure (missing package, unreadable/corrupt model weights, no space left) is a
+    dependency outage like any other, so it is converted into a typed
+    `ServiceUnavailableError`. Without this such a failure would escape the route as an
+    untyped exception: the client would get a 500 with a server-side traceback instead of a
+    503, and — because the PII rows are already committed by then — the request would be
+    left without its parent `request_logs` row, which is exactly the orphan the audit check
+    forbids. The original exception is chained with `from` for server-side logs only and is
+    never surfaced to the client.
     """
     global _model
     if _model is None:
         with _model_lock:
             if _model is None:
-                import sentence_transformers
+                try:
+                    import sentence_transformers
 
-                # Must match the model used by data/ingest.py at ingestion time, otherwise query
-                # vectors would not be comparable with the stored document vectors.
-                _model = sentence_transformers.SentenceTransformer(EMBEDDING_MODEL)
+                    # Must match the model used by data/ingest.py at ingestion time, otherwise query
+                    # vectors would not be comparable with the stored document vectors.
+                    _model = sentence_transformers.SentenceTransformer(EMBEDDING_MODEL)
+                except ServiceUnavailableError:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "embedding model %s failed to load", EMBEDDING_MODEL, exc_info=True
+                    )
+                    raise ServiceUnavailableError("embedding model") from exc
     return _model
 
 
@@ -150,9 +167,17 @@ def ask(
             detail="Request blocked: prompt injection detected",
         )
 
-    vector_store = VectorStore()
-    model = get_embedding_model()
     try:
+        # Constructing the vector store and loading the embedding model are dependency
+        # initializations, and both can fail: `VectorStore()` raises a typed
+        # ServiceUnavailableError when ChromaDB is unreachable, and `get_embedding_model()`
+        # converts a model-load failure into one. They therefore belong *inside* this guard —
+        # previously they ran before it, so a failure at either step skipped the
+        # `_write_llm_error_log` call below and left the already-committed PII rows without a
+        # parent `request_logs` row (the orphan the audit check forbids), and surfaced as a 500
+        # rather than a 503.
+        vector_store = VectorStore()
+        model = get_embedding_model()
         query_embedding = model.encode(redacted_prompt).tolist()
         results = vector_store.query(query_embedding, current_user.clearance_level, n_results=5)
 

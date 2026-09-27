@@ -122,14 +122,31 @@ class AskFailurePathTests(unittest.TestCase):
         importlib.reload(_qrmod)
         try:
             ask_fn = _qrmod.ask
-            service = "vector store" if fail_point == "vector" else "llm"
+            service = {"vector": "vector store",
+                       "vector_init": "vector store",
+                       "embed_init": "embedding model",
+                       "llm": "llm"}[fail_point]
             failing = mock.Mock(
                 side_effect=ServiceUnavailableError(service))
             # model.encode(...) must return a numpy-like vector: the route calls
             # .tolist() on the result.
             encode = mock.Mock(
                 return_value=mock.Mock(tolist=mock.Mock(return_value=[0.0])))
-            if fail_point == "vector":
+            if fail_point == "embed_init":
+                # The real get_embedding_model() runs so its load-failure handling
+                # is exercised; only the underlying sentence_transformers is faked
+                # (see the caller) and VectorStore is made to succeed.
+                ctx = [mock.patch.object(_qrmod, "VectorStore",
+                                         return_value=mock.Mock(
+                                             query=mock.Mock(return_value={
+                                                 "documents": [["doc one"]],
+                                                 "metadatas": [[{"source_document": "s.txt"}]]})))]
+            elif fail_point == "vector_init":
+                # The VectorStore *constructor* fails, before any query is made.
+                # Nothing else is patched: this asserts the init sits inside the
+                # guarded downstream block.
+                ctx = [mock.patch.object(_qrmod, "VectorStore", failing)]
+            elif fail_point == "vector":
                 ctx = [mock.patch.object(_qrmod, "VectorStore",
                                          return_value=mock.Mock(query=failing)),
                        mock.patch.object(_qrmod, "get_embedding_model",
@@ -202,6 +219,71 @@ class AskFailurePathTests(unittest.TestCase):
             exc = self._call_ask_with_failure(
                 qr, session, user, request_id, "my card 4111111111111111 please", "llm")
             self.assertEqual(exc.service, "llm")
+            self._assert_single_parent(session, qr, request_id, "4111111111111111")
+        finally:
+            session.close()
+
+
+    def test_vector_store_construction_failure_after_pii(self):
+        """A failure inside `VectorStore()` must take the typed 503 path.
+
+        Regression test for initialization happening *outside* the guarded
+        downstream section: the constructor used to run before the `try`, so its
+        ServiceUnavailableError bypassed `_write_llm_error_log` and left the
+        committed PII row orphaned (and surfaced as a 500).
+        """
+        if not _GATEWAY_DEPS:
+            self.skipTest("gateway dependency chain not installed (run in-container)")
+        from unittest import mock
+        from gateway.errors import ServiceUnavailableError
+
+        session, user, qr, uuid = self._setup()
+        try:
+            request_id = uuid.uuid4()
+            exc = self._call_ask_with_failure(
+                qr, session, user, request_id, "my card 4111111111111111 please",
+                "vector_init")
+            # Typed path: a ServiceUnavailableError, not an untyped exception.
+            self.assertIsInstance(exc, ServiceUnavailableError)
+            self.assertEqual(exc.service, "vector store")
+            # Exactly one PII event and exactly one linked llm_error parent row,
+            # with a sanitized prompt, safe error text and zero tokens.
+            self._assert_single_parent(session, qr, request_id, "4111111111111111")
+        finally:
+            session.close()
+
+    def test_embedding_model_load_failure_after_pii(self):
+        """A model-load failure must be converted to a typed service-unavailable error.
+
+        `get_embedding_model()` previously let import/load exceptions escape
+        untyped, which meant a 500 plus an orphaned PII row. It now raises
+        ServiceUnavailableError("embedding model") and must therefore write the
+        sanitized parent row exactly like the other downstream failures.
+        """
+        if not _GATEWAY_DEPS:
+            self.skipTest("gateway dependency chain not installed (run in-container)")
+        from unittest import mock
+        from gateway.errors import ServiceUnavailableError
+
+        session, user, qr, uuid = self._setup()
+        try:
+            request_id = uuid.uuid4()
+            # Simulate a real load failure: sentence_transformers is importable
+            # but constructing the model raises (missing/corrupt weights, disk
+            # full, out of memory). The real get_embedding_model() must convert
+            # this into a typed ServiceUnavailableError("embedding model").
+            fake_st = mock.Mock(
+                SentenceTransformer=mock.Mock(
+                    side_effect=OSError("No space left on device")))
+            with mock.patch.dict(sys.modules, {"sentence_transformers": fake_st}):
+                with mock.patch.object(qr, "_model", None):
+                    exc = self._call_ask_with_failure(
+                        qr, session, user, request_id, "my card 4111111111111111 please",
+                        "embed_init")
+            # Typed path, and the original OSError is not exposed to the caller.
+            self.assertIsInstance(exc, ServiceUnavailableError)
+            self.assertEqual(exc.service, "embedding model")
+            self.assertNotIn("No space left", exc.detail)
             self._assert_single_parent(session, qr, request_id, "4111111111111111")
         finally:
             session.close()

@@ -674,24 +674,36 @@ The earlier `2026-09-27-verification.md` is SUPERSEDED by the closing report.
 - **Correction to earlier records:** `tests/test_integration_live.py` is a
   *script* (`def main()`, no `unittest.TestCase` classes). Running
   `python -m unittest tests.test_integration_live` reports
-  `Ran 0 tests / NO TESTS RAN` and executes **no** integration checks. The
-  "21/21" and "33/33" figures cited in earlier notes are therefore **not**
-  unittest-collected results for that file: 21/21 is the sum of the focused
-  unit suites only (`test_pii_detection` + `test_ask_failure_live` +
-  `test_ask_http_503_live`), while 33/33 comes from the separate
-  `python tests/test_integration_live.py --fast --no-disruption` script run.
-  These two result classes must not be conflated.
+  `Ran 0 tests / NO TESTS RAN` and executes **no** integration checks. Full
+  count breakdown:
+
+| Figure | Suites actually included | Notes |
+| --- | --- | --- |
+| "21/21 combined" | `test_pii_detection` + `test_ask_failure_live` | predates `test_ask_http_503_live.py` (contributed 0); `test_integration_live` contributed 0 |
+| "23/23 combined" | + `test_ask_http_503_live` | first run including the ASGI-level suite |
+| "25/25 combined" (current) | same three suites | after adding 2 initialization-failure tests |
+| "integration 33/33" | **not a unittest run** | separately invoked script `python tests/test_integration_live.py --fast --no-disruption`; prior result, not re-executed |
+
+Unittest counts and integration-script results are never summed or presented as
+the same class of evidence; historical figures are labelled as prior results.
 - Offline PII unit suite: PASS (17 host / 19 in-container).
-- Failure-path regression tests: PASS (2/2 `test_ask_failure_live`, direct
-  handler; 2/2 `test_ask_http_503_live`, full ASGI app -> real HTTP 503).
-- Combined focused unit run: **23/23 OK**.
+- Failure-path regression tests: PASS (4/4 `test_ask_failure_live`, direct
+  handler — query, constructor-init and embedding-model-init failures; 2/2
+  `test_ask_http_503_live`, full ASGI app -> real HTTP 503).
+- Combined focused unit run: **25/25 OK**.
+- Downstream-init fix: `VectorStore()` / `get_embedding_model()` moved inside
+  the guarded block, and model-load failures now convert to a typed
+  `ServiceUnavailableError("embedding model")`, so no downstream-init path can
+  return 500 or orphan the already-committed PII rows.
 - Live rate-limit/token suite: **PASS 21/21** (rerun on a populated
   collection; `documents_retrieved=4` for admin1, logged `prompt_tokens=350`
   cross-checked equal to a direct `OllamaClient().chat()` `prompt_eval_count`
   of 350, and 1-doc emp1=162 < 4-doc admin1=350).
 - Live e2e suite (`tests/test_ask_e2e_live.py`): **PASS** — HTTP 200,
   `Sources: ['engineering_policy.txt']`, answer grounded in that document,
-  audit row `status=success, prompt_tokens=156, completion_tokens=89`.
+  audit row `status=success, prompt_tokens=156, completion_tokens=89`,
+  joined to `users` as **username `emp1`, clearance_level 1** (exactly one
+  matching row; consistent with the script authenticating as `emp1`).
 - RAG data: Chroma `count()=4` (one chunk per document, clearance 1/2/2/3);
   clearance-filtered retrieval returns 1/3/4 documents for levels 1/2/3.
 - Chroma persistence across `docker compose up -d --force-recreate --no-deps

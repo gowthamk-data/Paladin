@@ -22,14 +22,18 @@ NO TESTS RAN
 
 Consequences for previously recorded figures:
 
-| Figure | What it actually measures |
-| --- | --- |
-| "integration 33/33" | the **script** `python tests/test_integration_live.py --fast --no-disruption`, not unittest |
-| "21/21 combined" | sum of focused **unit** suites only (`test_pii_detection` + `test_ask_failure_live` + `test_ask_http_503_live`); `test_integration_live` contributed **0** |
+| Figure | Suites actually included | Notes |
+| --- | --- | --- |
+| "21/21 combined" | `test_pii_detection` + `test_ask_failure_live` **only** | `test_ask_http_503_live.py` did not exist yet, so it contributed **0**. `test_integration_live` contributed **0** (script, not unittest). |
+| "23/23 combined" | `test_pii_detection` + `test_ask_failure_live` + `test_ask_http_503_live` | first run that included the new ASGI-level suite |
+| "25/25 combined" (current) | `test_pii_detection` + `test_ask_failure_live` + `test_ask_http_503_live` | after adding the 2 initialization-failure tests (§4) |
+| "integration 33/33" | **none** — not a unittest run at all | comes from the separately invoked script `python tests/test_integration_live.py --fast --no-disruption` |
 
-These two result classes must not be conflated. The 33/33 integration result
-itself was not re-executed in this pass (out of scope by instruction) and is
-carried forward as a prior result, not as fresh evidence.
+Strict rule applied throughout this document: **unittest counts and
+integration-script results are never summed or presented as the same class of
+evidence.** The 33/33 integration figure was not re-executed in this pass (out
+of scope by instruction) and is carried forward as a prior result only — it is
+not a new run.
 
 ## 1. RAG data verification
 
@@ -149,6 +153,23 @@ sanitized_prompt= 'What are the key engineering security requirements?'
 
 Non-zero tokens on a `success` row further exclude the fallback path.
 
+**Audit-row user identification.** The row for request id
+`8931a63d-25c4-438a-bcd3-7a550e049fcc` was located in `request_logs` and joined
+to `users`. Exactly **one** row matches, with `prompt_tokens=156` and
+`completion_tokens=89` as recorded above:
+
+| field | value |
+| --- | --- |
+| `user_id` | 1 |
+| **username** | **`emp1`** |
+| **clearance_level** | **1** |
+| `status` | `success` |
+
+This is consistent with the run: the e2e script authenticates as `emp1`
+(clearance 1), which is why only the single clearance-1 document
+(`engineering_policy.txt`) was returned. No prompt text, response body,
+credential or unrelated audit row is reproduced here.
+
 ## 3. HTTP-level 503 coverage — ACHIEVED (not deferred)
 
 New file `tests/test_ask_http_503_live.py` (`AskHttp503Tests`, 2 tests) drives
@@ -241,8 +262,106 @@ Caveat: this is a local Docker Desktop check only. It does not establish
 persistence on the OCI target, where the storage driver, filesystem and volume
 configuration differ.
 
+## 4. Audit-failure fix — dependency initialization inside the guard
+
+### 4.1 The defect
+
+`VectorStore()` and `get_embedding_model()` were called **before** the
+`try:` block that guards the downstream section:
+
+```python
+vector_store = VectorStore()      # <-- outside the guard
+model = get_embedding_model()     # <-- outside the guard
+try:
+    ... retrieval / generation ...
+except ServiceUnavailableError:
+    _write_llm_error_log(db, request_id, current_user, redacted_prompt)
+    raise
+```
+
+Both initializers can fail — and `VectorStore.__init__` deliberately raises a
+typed `ServiceUnavailableError` when ChromaDB is unreachable. Because the
+exception was raised before the guard, it bypassed `_write_llm_error_log`
+entirely. Since the PII rows are committed *earlier* in the request, the result
+was precisely the orphan the audit check forbids: committed `pii_events` rows
+with no parent `request_logs` row. Only `query()`/`chat()` failures were
+covered, so a ChromaDB outage detected at connection time escaped the fix.
+
+### 4.2 Embedding-model initialization
+
+`get_embedding_model()` was the weaker link. Unlike `VectorStore` (which wraps
+every failure in `ServiceUnavailableError`) and `OllamaClient` (whose `__init__`
+cannot fail), it called `sentence_transformers.SentenceTransformer(...)` with
+no error handling. A load failure — missing package, corrupt/unreadable weights,
+disk full, OOM — propagated as an **untyped** exception, producing a **500**
+with a server-side traceback rather than a **503**, and again leaving the
+committed PII rows orphaned.
+
+It now converts any load failure into `ServiceUnavailableError("embedding
+model")`, logging the original with `exc_info=True` server-side and chaining it
+via `from` for the log trail. The original message is never surfaced to the
+client: the raised error's `detail` is the fixed
+`"embedding model is temporarily unavailable"`, and the generic 503 handler in
+`gateway/errors.py` renders only that fixed text.
+
+### 4.3 The fix
+
+Both initializations moved inside the existing guard, so every downstream
+failure — construction, model load, embedding, query, generation — now takes
+the same typed path: write the sanitized `llm_error` parent row, then re-raise
+so the 503 handler responds.
+
+### 4.4 Regression coverage
+
+Two focused tests added to `tests/test_ask_failure_live.py`:
+
+- `test_vector_store_construction_failure_after_pii` — patches only
+  `VectorStore` so the **constructor** raises. Asserts the typed path is taken
+  (`isinstance` of `ServiceUnavailableError`, `service == "vector store"`), and
+  that exactly one PII event and exactly one linked `llm_error` parent row
+  exist, with the stored prompt sanitized (`****`, raw card number absent), the
+  safe fixed error text, and zero tokens.
+- `test_embedding_model_load_failure_after_pii` — lets the **real**
+  `get_embedding_model()` run while faking `sentence_transformers` to raise
+  `OSError("No space left on device")`. Asserts the typed conversion
+  (`service == "embedding model"`), that the underlying OSError text is *not*
+  leaked into `exc.detail`, and the same single-PII-event / single-parent-row /
+  sanitized / zero-token invariants.
+
+```
+$ docker compose exec -T -e PYTHONPATH=/app:/tmp paladin-api \
+    python -W ignore -m unittest test_ask_failure_live -v
+test_embedding_model_load_failure_after_pii ... ok
+test_llm_failure_after_pii ... ok
+test_vector_failure_after_pii ... ok
+test_vector_store_construction_failure_after_pii ... ok
+Ran 4 tests in 0.677s
+OK
+```
+
+Combined focused run after the change:
+
+```
+$ docker compose exec -T -e PYTHONPATH=/app:/tmp paladin-api \
+    python -W ignore -m unittest test_pii_detection test_ask_failure_live test_ask_http_503_live
+Ran 25 tests in 0.727s
+OK
+```
+
+The tracebacks printed during these runs are the handlers' intentional
+server-side `exc_info=True` logging, not test failures. No LLM suite was run
+for this change, as instructed; the only live check was a single `/ask` smoke
+test after restarting the API, which returned HTTP 200 with
+`Sources: ['engineering_policy.txt']`, confirming the guard move did not
+regress the success path.
+
 ## 5. Modified files (all uncommitted)
 
+- `paladin/gateway/routes/query_routes.py` — dependency initialization moved
+  inside the guarded downstream block; `get_embedding_model()` now converts load
+  failures into a typed `ServiceUnavailableError`
+- `paladin/tests/test_ask_failure_live.py` — 2 new initialization-failure
+  regression tests (4 total in this file)
 - `paladin/tests/test_ask_http_503_live.py` — **new**, HTTP-level 503 coverage
 - `paladin-plan.md` — verification status rewritten with fresh results + the
   `test_integration_live.py` correction
@@ -273,9 +392,13 @@ configuration differ.
 
 Phase 6 is **GREEN for the local environment**: RAG data verified non-empty
 with real clearance-filtered retrieval, both targeted suites pass against that
-populated collection with token cross-checks, the `/ask` 503 path is now
-covered at the HTTP level, and Chroma persistence survives container
-recreation with the volume preserved.
+populated collection with token cross-checks, the `/ask` 503 path is covered at
+the HTTP level, the downstream-initialization gap is closed and covered by two
+further regression tests (focused run 25/25 OK), and Chroma persistence
+survives container recreation with the volume preserved.
+
+No check in this pass failed, and the E2E audit row was verified against
+PostgreSQL (username `emp1`, clearance 1).
 
 **Deployment status: LOCAL ONLY. OCI ARM64 build, manifest, resource and
 persistence verification are OUTSTANDING.** Nothing is committed, pushed or
