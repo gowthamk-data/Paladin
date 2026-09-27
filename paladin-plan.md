@@ -6,9 +6,9 @@
 | ------------------- | ------------------------------------------------------------------------------ |
 | Clearance levels    | 1=Employee, 2=Manager, 3=Admin                                                 |
 | PII handling        | Redact PII and continue (log event)                                            |
-| Rate limit          | 10 req/min, burst 20, per authenticated user                                   |
+| Rate limit          | 10 req/min sustained, burst 20, per authenticated user; slowapi `memory://` (single-process; does not scale across workers/replicas) |
 | Chat history        | Persist to PostgreSQL (audit trail only, no conversation threading)            |
-| Ollama model        | `llama3:8b-instruct`                                                         |
+| Ollama model        | Env-driven: `llama3.2:3b` local default, `llama3` deployed/demo (`OLLAMA_MODEL` in `.env`) |
 | JWT key management  | Auto-generate on first run via`scripts/generate_rsa_keys.sh`                 |
 | ChromaDB filter     | Integer metadata:`clearance_level <= user_clearance_level`                   |
 | Token counts        | Ollama native`prompt_eval_count` / `eval_count`                            |
@@ -445,7 +445,7 @@ class PaladinClient:
 
 - Login as emp1 → Chat page accessible
 - Ask question → Response displayed with sources
-- Login as admin1 → Can access `/metrics/summary`
+- Login as admin1 → Can access `/metrics/stats` (NOT `/metrics/summary`)
 - Token expiry → Redirect to login
 
 ---
@@ -456,7 +456,7 @@ class PaladinClient:
 
 ### Files to Create
 
-- `paladin/gateway/routes/metrics_routes.py` - `GET /metrics/summary`
+- `paladin/gateway/routes/metrics_routes.py` - `GET /metrics/stats` (admin only; NOT `/metrics/summary`)
 - `paladin/tests/test_jwt_security.py`
 - `paladin/tests/test_authorization.py`
 - `paladin/tests/test_pii_detection.py`
@@ -465,7 +465,7 @@ class PaladinClient:
 
 ### Admin Metrics (metrics_routes.py)
 
-**Endpoint:** `GET /metrics/summary` (requires role=admin)
+**Endpoint:** `GET /metrics/stats` (requires role=admin; the `/metrics/summary` path in earlier drafts was never implemented)
 
 **Metrics (aggregate SQL queries):**
 
@@ -530,8 +530,8 @@ Sections:
 
 ### Key Considerations
 
-- **ARM compatibility**: All images must support `linux/arm64` (Postgres 16, Ollama, ChromaDB, Redis all do)
-- **Memory limits**: OCI Always Free = 1GB RAM → set Docker resource limits
+- **ARM compatibility**: All images must support `linux/arm64` (Postgres 16.15, Ollama 0.34.2, ChromaDB 0.4.24 expected; UNVERIFIED on target as of 2026-09-27 — manifest + native build checks outstanding)
+- **Memory limits**: Standard OCI Ampere A1 = 2 OCPUs / 12 GB per tenancy (NOT 1 GB). Enforced `mem_limit`/`cpus` per service (plain `docker compose up` ignores `deploy.resources`); Ollama capped at 8G/2.0 CPUs. Limits are ceilings, not reservations — safety comes from observed usage, and ARM64 re-measurement is outstanding.
 - **Network isolation**: Internal network only, no published ports for backend services
 - **Persistence**: Named volumes for Postgres, ChromaDB, Ollama data
 
@@ -541,19 +541,21 @@ Sections:
 deploy:
   resources:
     limits:
-      memory: 512M  # per service on 1GB VM
+      memory: 8G  # ollama; api 2G, chroma 1G, postgres/ui 512M each (see docker-compose.yml)
+# NOTE: plain `docker compose up` IGNORES deploy.resources — the stack duplicates
+# every cap as top-level mem_limit/mem_reservation/cpus, which the engine enforces.
 ```
 
 ### deploy_oci.md
 
 Steps:
 
-1. Provision OCI VM (ARM, Ubuntu 22.04, 1GB RAM)
-2. Install Docker & Docker Compose
-3. Copy project + `.env`
+1. Provision OCI VM (Ampere A1 ARM64, Oracle Linux/Ubuntu 22.04, within the 2 OCPU / 12 GB tenancy budget — NOT a 1 GB micro instance)
+2. Install Docker & Docker Compose plugin, bash, openssl
+3. Copy project (private transfer only); create fresh `.env` (`OLLAMA_MODEL=llama3` for demo) + fresh RSA keys; NEVER copy `.env`/`keys/` between machines
 4. `docker compose up -d`
-5. Verify ports 8000 (API) + 8501 (UI) accessible
-6. Pull `llama3:8b-instruct` in Ollama container (large download)
+5. Verify ports 8000 (API) + 8501 (UI) accessible; postgres/chromadb/ollama publish no ports
+6. Pull `llama3` in Ollama container via `./scripts/setup_ollama.sh` (large ~4.7 GB download)
 
 ---
 
@@ -661,5 +663,43 @@ scripts/
 | 5. LLM            | `/ask` returns responses; token counts logged; clearance enforced |
 | 6. Security       | PII redacted; rate limit enforced; correlation IDs present          |
 | 7. Frontend       | Streamlit chat working end-to-end with login                        |
-| 8. Finalization   | All 4 test files pass; README complete                              |
-| 9. Deployment     | OCI deploy guide validated; resource limits set                     |
+| 8. Finalization   | Unit suite + available live suites run; report written; README complete      |
+| 9. Deployment     | OCI deploy guide corrected; ARM64 build + stats/ps re-measurement UNVERIFIED |
+
+## Verification Status (2026-09-27 follow-up — see paladin/test-reports/2026-09-27-phase6-closing.md)
+
+Fresh results from the Phase 6 follow-up pass (local x86_64 Docker Desktop only).
+The earlier `2026-09-27-verification.md` is SUPERSEDED by the closing report.
+
+- **Correction to earlier records:** `tests/test_integration_live.py` is a
+  *script* (`def main()`, no `unittest.TestCase` classes). Running
+  `python -m unittest tests.test_integration_live` reports
+  `Ran 0 tests / NO TESTS RAN` and executes **no** integration checks. The
+  "21/21" and "33/33" figures cited in earlier notes are therefore **not**
+  unittest-collected results for that file: 21/21 is the sum of the focused
+  unit suites only (`test_pii_detection` + `test_ask_failure_live` +
+  `test_ask_http_503_live`), while 33/33 comes from the separate
+  `python tests/test_integration_live.py --fast --no-disruption` script run.
+  These two result classes must not be conflated.
+- Offline PII unit suite: PASS (17 host / 19 in-container).
+- Failure-path regression tests: PASS (2/2 `test_ask_failure_live`, direct
+  handler; 2/2 `test_ask_http_503_live`, full ASGI app -> real HTTP 503).
+- Combined focused unit run: **23/23 OK**.
+- Live rate-limit/token suite: **PASS 21/21** (rerun on a populated
+  collection; `documents_retrieved=4` for admin1, logged `prompt_tokens=350`
+  cross-checked equal to a direct `OllamaClient().chat()` `prompt_eval_count`
+  of 350, and 1-doc emp1=162 < 4-doc admin1=350).
+- Live e2e suite (`tests/test_ask_e2e_live.py`): **PASS** — HTTP 200,
+  `Sources: ['engineering_policy.txt']`, answer grounded in that document,
+  audit row `status=success, prompt_tokens=156, completion_tokens=89`.
+- RAG data: Chroma `count()=4` (one chunk per document, clearance 1/2/2/3);
+  clearance-filtered retrieval returns 1/3/4 documents for levels 1/2/3.
+- Chroma persistence across `docker compose up -d --force-recreate --no-deps
+  chromadb`: volume `paladin_chromadb_data` preserved (unchanged
+  `created=2026-09-22T17:01:08Z`), count still 4, IDs unchanged, live `/ask`
+  still served afterwards.
+- Historical integration/auth results above stand as previously recorded but
+  were **not re-executed** in this pass (out of scope by instruction).
+- Disruptive outage checks, OCI ARM64 build/manifests, and `docker stats` +
+  `ollama ps` sign-off on the real target: **OUTSTANDING**. No deployment
+  readiness is claimed. Verdict remains **local-only**.

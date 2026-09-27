@@ -38,7 +38,7 @@ docker compose up -d --build
 
 # first run only: pull the model and build the retrieval index
 ./scripts/setup_ollama.sh # pulls "$OLLAMA_MODEL" inside the ollama container
-docker compose exec -T paladin-api python data/ingest.py
+docker compose exec -T -e PYTHONPATH=/app paladin-api python data/ingest.py
 docker compose exec -T paladin-api python -m gateway.db.seed
 ```
 
@@ -131,7 +131,7 @@ python -m unittest tests.test_pii_detection -v
 
 # live suites: require `docker compose up -d --build` plus a pulled model and seeded DB
 ./scripts/setup_ollama.sh # pulls "$OLLAMA_MODEL" inside the ollama container
-docker compose exec paladin-api python data/ingest.py
+docker compose exec -T -e PYTHONPATH=/app paladin-api python data/ingest.py
 docker compose exec paladin-api python -m gateway.db.seed
 
 python tests/test_auth_live.py                  # JWT claims, tampering, expiry, audience
@@ -220,7 +220,7 @@ above, not a 1 GB micro instance.
    ./scripts/generate_rsa_keys.sh
    docker compose up -d --build
    ./scripts/setup_ollama.sh   # pulls "$OLLAMA_MODEL"; large download (~4.7 GB for llama3)
-   docker compose exec -T paladin-api python data/ingest.py
+   docker compose exec -T -e PYTHONPATH=/app paladin-api python data/ingest.py
    docker compose exec -T paladin-api python -m gateway.db.seed
    ```
    The stack must be running before `setup_ollama.sh` (it shells into the

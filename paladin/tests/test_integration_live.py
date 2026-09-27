@@ -528,7 +528,9 @@ def part6_audit_and_secrets(tokens):
 
     orphans = psql(
         "SELECT COUNT(*) FROM pii_events e LEFT JOIN request_logs r "
-        "ON r.request_id = e.request_id WHERE r.request_id IS NULL;"
+        "ON r.request_id = e.request_id LEFT JOIN denial_logs d "
+        "ON d.request_id = e.request_id "
+        "WHERE r.request_id IS NULL AND d.request_id IS NULL;"
     )[0][0]
     record("every PII redaction event belongs to a request that was logged", int(orphans) == 0,
            f"orphans={orphans}")

@@ -1,3 +1,4 @@
+import logging
 import threading
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import JSONResponse
@@ -14,11 +15,59 @@ from gateway.security.rate_limiter import (
     SUSTAINED_LIMIT_STRING,
 )
 from gateway.config import EMBEDDING_MODEL, MAX_PROMPT_CHARS
-from gateway.errors import PayloadTooLargeError
+from gateway.errors import PayloadTooLargeError, ServiceUnavailableError
 from gateway.rag.vector_store import VectorStore
 from gateway.llm.ollama_client import OllamaClient
 
 router = APIRouter(prefix="/ask", tags=["query"])
+
+logger = logging.getLogger("paladin.query")
+
+# Status recorded on the parent audit row when PII redaction rows were already
+# committed but a downstream dependency (vector store / LLM / DB commit) failed
+# before the normal `success` row could be written. The value is deliberately
+# distinct from `success` so token-aggregation queries are unaffected.
+LLM_ERROR_STATUS = "llm_error"
+
+# Fixed, safe payload stored in `llm_response` for the error row. Only the
+# already-sanitized prompt and this constant are persisted — never raw PII and
+# never exception reprs / driver messages (see gateway/errors.py rule 1).
+LLM_ERROR_RESPONSE = "Request could not be completed: downstream dependency unavailable"
+
+
+def _write_llm_error_log(db: Session, request_id, user: User, redacted_prompt: str) -> bool:
+    """Write the parent `request_logs` row for a failed request.
+
+    Returns True when a row was inserted, False when a row for this
+    ``request_id`` already exists (idempotency guard against duplicates) or
+    when the write itself failed (DB down — the original error is then
+    re-raised by the caller and the 503 handler still responds).
+    """
+    try:
+        existing = (
+            db.query(RequestLog).filter(RequestLog.request_id == request_id).first()
+        )
+        if existing is not None:
+            return False
+        db.add(
+            RequestLog(
+                request_id=request_id,
+                user_id=user.id,
+                department=user.department,
+                clearance_level=user.clearance_level,
+                sanitized_prompt=redacted_prompt,
+                llm_response=LLM_ERROR_RESPONSE,
+                prompt_tokens=0,
+                completion_tokens=0,
+                status=LLM_ERROR_STATUS,
+            )
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        logger.error("request_id=%s could not write llm_error audit row", request_id, exc_info=True)
+        return False
 
 _model = None
 _model_lock = threading.Lock()
@@ -103,29 +152,38 @@ def ask(
 
     vector_store = VectorStore()
     model = get_embedding_model()
-    query_embedding = model.encode(redacted_prompt).tolist()
-    results = vector_store.query(query_embedding, current_user.clearance_level, n_results=5)
+    try:
+        query_embedding = model.encode(redacted_prompt).tolist()
+        results = vector_store.query(query_embedding, current_user.clearance_level, n_results=5)
 
-    documents = []
-    sources = []
-    if results and results.get("documents") and results["documents"]:
-        for doc in results["documents"][0]:
-            documents.append(doc)
-        if results.get("metadatas") and results["metadatas"]:
-            for meta in results["metadatas"][0]:
-                sources.append(meta.get("source_document", "unknown"))
+        documents = []
+        sources = []
+        if results and results.get("documents") and results["documents"]:
+            for doc in results["documents"][0]:
+                documents.append(doc)
+            if results.get("metadatas") and results["metadatas"]:
+                for meta in results["metadatas"][0]:
+                    sources.append(meta.get("source_document", "unknown"))
 
-    if not documents:
-        llm_response = "No relevant documents found for your query at your clearance level."
-        prompt_tokens = 0
-        completion_tokens = 0
-    else:
-        messages = build_messages(redacted_prompt, documents)
-        ollama = OllamaClient()
-        result = ollama.chat(messages)
-        llm_response = result["response"]
-        prompt_tokens = result["prompt_eval_count"]
-        completion_tokens = result["eval_count"]
+        if not documents:
+            llm_response = "No relevant documents found for your query at your clearance level."
+            prompt_tokens = 0
+            completion_tokens = 0
+        else:
+            messages = build_messages(redacted_prompt, documents)
+            ollama = OllamaClient()
+            result = ollama.chat(messages)
+            llm_response = result["response"]
+            prompt_tokens = result["prompt_eval_count"]
+            completion_tokens = result["eval_count"]
+    except ServiceUnavailableError:
+        # PII redaction rows may already be committed (see above) while no
+        # parent `request_logs` row exists yet — that is exactly the orphan the
+        # audit check forbids. Write the `llm_error` parent row (sanitized
+        # prompt + fixed safe message only; the helper is idempotent), then
+        # re-raise so the 503 handler still responds with the typed error.
+        _write_llm_error_log(db, request_id, current_user, redacted_prompt)
+        raise
 
     log_entry = RequestLog(
         request_id=request_id,

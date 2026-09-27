@@ -61,7 +61,8 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY gateway/ ./gateway/
 # data/ is kept because ingestion (data/ingest.py) is run from inside this container with
-# `docker compose exec paladin-api python data/ingest.py`; it is a few kilobytes.
+# `docker compose exec -T -e PYTHONPATH=/app paladin-api python data/ingest.py`
+# (PYTHONPATH is required: the image does not put /app on sys.path); it is a few kilobytes.
 COPY data/ ./data/
 
 # The RSA signing key pair is mounted read-only at runtime (see docker-compose.yml). The paths
