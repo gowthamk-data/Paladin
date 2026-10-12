@@ -6,6 +6,8 @@ collected by a test runner.
 | File | Kind | Needs the stack? | Command |
 | --- | --- | --- | --- |
 | `test_pii_detection.py` | unit (pure Python) | no | `python -m unittest tests.test_pii_detection -v` (or `python -m pytest tests/test_pii_detection.py -v`) |
+| `test_abac_policy.py`, `test_abac_vector_store.py`, `test_ingest_manifest.py` | isolated ABAC/ingestion unit tests (pytest style: `parametrize`, `pytest.raises`, `tmp_path`) | no | `python scripts/run_isolated_abac_tests.py` (or, where pytest is installed: `python -m pytest tests/test_abac_policy.py tests/test_abac_vector_store.py tests/test_ingest_manifest.py -v`) |
+| `test_abac_secondary_denial.py`, `test_ask_http_503_live.py` | isolated ASGI unittest suites (the denial test injects a deliberately filter-bypassing result) | no live services | `python scripts/run_isolated_abac_tests.py` |
 | `test_integration_live.py` | live integration | yes | `python tests/test_integration_live.py` |
 | `test_auth_live.py` | live (auth matrix) | yes | `python tests/test_auth_live.py` |
 | `test_rate_limit_and_tokens_live.py` | live (rate limit, concurrency, token logging, correlation ids, login throttling) | yes | `python tests/test_rate_limit_and_tokens_live.py [--part0\|--burst\|--extra]` |
@@ -15,6 +17,19 @@ collected by a test runner.
 Every command is run from the project root (`paladin/`, the directory containing
 `docker-compose.yml`). The live harnesses print a `PASS`/`FAIL` line per check and exit non-zero
 if any check failed, so they can gate a pipeline.
+
+## Isolated ABAC route tests
+
+`python scripts/run_isolated_abac_tests.py` builds the API Dockerfile with a unique temporary image tag and runs the whole ABAC unit-test suite in a disposable container, split by framework:
+the pytest-style files (`test_abac_policy`, `test_abac_vector_store`, `test_ingest_manifest`) under pytest, and the unittest-style files (`test_abac_secondary_denial`,
+`test_ask_http_503_live`) under `python -m unittest`. pytest is never baked into the production image: the runner downloads the pure-python pytest wheels on the host
+into a temporary wheelhouse, mounts it read-only into the disposable container, and installs pytest from those wheels with `pip --no-index` into a tmpfs; the container runs
+with `--network none` and therefore cannot reach any package index or service. The host `tests/` directory is mounted read-only; the container uses an in-memory SQLite
+session through the tests' dependency overrides and receives no JWT signing keys. The temporary image tag and wheelhouse are removed afterward, and a
+zero-collected-tests result is reported as a failure rather than a pass. This runner does not rebuild or restart the Compose API service, touch the `paladin-paladin-api:latest` image, or require PostgreSQL, ChromaDB, or Ollama to be running.
+
+The ABAC secondary-denial test deliberately injects a result that violates the normal Chroma
+filter. It verifies the defense-in-depth denial branch, not a normal-path ABAC denial.
 
 ## Why the live harnesses are not collected by pytest
 

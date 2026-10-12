@@ -44,6 +44,14 @@ class PayloadTooLargeError(Exception):
         super().__init__(detail)
 
 
+class AuthorizationDeniedError(Exception):
+    """A retrieval result or authorization predicate failed closed."""
+
+    def __init__(self, reason_code: str):
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
 def get_request_id(request: Request) -> str:
     """Return the correlation id for error reporting without depending on middleware order."""
     return getattr(request.state, "correlation_id", None) or "unknown"

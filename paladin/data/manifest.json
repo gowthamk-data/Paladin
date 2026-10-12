@@ -1,0 +1,26 @@
+{
+  "engineering_policy.txt": {
+    "classification_level": 1,
+    "department": "Engineering",
+    "visibility": "department",
+    "content_sha256": "2eaec76c5bc3d321ac0827c10a8cb2e5c4d20d42f7feec731f5bf49d014f8995"
+  },
+  "finance_guidelines.txt": {
+    "classification_level": 2,
+    "department": "Finance",
+    "visibility": "department",
+    "content_sha256": "aea799988338a125af34edd90885dbce3d9ae44868a2dd8befcd306a7dd78686"
+  },
+  "executive_briefing.md": {
+    "classification_level": 3,
+    "department": "Executive",
+    "visibility": "department",
+    "content_sha256": "9b7be638985f6900e93d2c3a43a207237db4ad84160d31d59a47c19d68d9efd0"
+  },
+  "hr_handbook.md": {
+    "classification_level": 2,
+    "department": "HR",
+    "visibility": "company-wide",
+    "content_sha256": "901d92b254a33d9a8beef1debe91bd1fe935f7fa8a87e4649c7e798d1990edd0"
+  }
+}

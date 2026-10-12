@@ -15,7 +15,12 @@ from gateway.security.rate_limiter import (
     SUSTAINED_LIMIT_STRING,
 )
 from gateway.config import EMBEDDING_MODEL, MAX_PROMPT_CHARS
-from gateway.errors import PayloadTooLargeError, ServiceUnavailableError
+from gateway.authz.policy import build_chroma_filter
+from gateway.errors import (
+    AuthorizationDeniedError,
+    PayloadTooLargeError,
+    ServiceUnavailableError,
+)
 from gateway.rag.vector_store import VectorStore
 from gateway.llm.ollama_client import OllamaClient
 
@@ -176,10 +181,29 @@ def ask(
         # `_write_llm_error_log` call below and left the already-committed PII rows without a
         # parent `request_logs` row (the orphan the audit check forbids), and surfaced as a 500
         # rather than a 503.
+        # Validate the complete ABAC predicate before touching the model. This is deliberately
+        # separate from the vector-store implementation so malformed user attributes fail closed.
+        try:
+            build_chroma_filter(current_user)
+        except ValueError as exc:
+            reason_code = str(exc)
+            db.add(
+                DenialLog(
+                    request_id=request_id,
+                    user_id=current_user.id,
+                    department=None,
+                    clearance_level=None,
+                    reason_code=reason_code,
+                    reason_detail="Authorization attributes are invalid",
+                    sanitized_prompt=redacted_prompt,
+                )
+            )
+            db.commit()
+            raise HTTPException(status_code=403, detail="Access denied") from exc
         vector_store = VectorStore()
         model = get_embedding_model()
         query_embedding = model.encode(redacted_prompt).tolist()
-        results = vector_store.query(query_embedding, current_user.clearance_level, n_results=5)
+        results = vector_store.query(query_embedding, current_user, n_results=5)
 
         documents = []
         sources = []
@@ -201,6 +225,20 @@ def ask(
             llm_response = result["response"]
             prompt_tokens = result["prompt_eval_count"]
             completion_tokens = result["eval_count"]
+    except AuthorizationDeniedError as exc:
+        db.add(
+            DenialLog(
+                request_id=request_id,
+                user_id=current_user.id,
+                department=current_user.department,
+                clearance_level=current_user.clearance_level,
+                reason_code=exc.reason_code,
+                reason_detail="Retrieved document failed authorization",
+                sanitized_prompt=redacted_prompt,
+            )
+        )
+        db.commit()
+        raise HTTPException(status_code=403, detail="Access denied") from exc
     except ServiceUnavailableError:
         # PII redaction rows may already be committed (see above) while no
         # parent `request_logs` row exists yet — that is exactly the orphan the

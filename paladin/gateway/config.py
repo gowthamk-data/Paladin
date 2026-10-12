@@ -13,6 +13,7 @@ JWT_EXPIRY_MINUTES = int(os.environ.get("JWT_EXPIRY_MINUTES", "30"))
 
 CHROMADB_HOST = os.environ.get("CHROMADB_HOST", "chromadb")
 CHROMADB_PORT = int(os.environ.get("CHROMADB_PORT", "8000"))
+CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "paladin_docs_abac")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 # Local-development default is the small instruct model; deployed/demo uses
 # OLLAMA_MODEL=llama3 via .env. Selection is entirely environment-driven.

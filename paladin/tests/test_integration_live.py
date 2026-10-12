@@ -44,6 +44,7 @@ USERS = {
     "emp1": ("emp1", "emp1_pass"),
     "mgr1": ("mgr1", "mgr1_pass"),
     "admin1": ("admin1", "admin1_pass"),
+    "fin1": ("fin1", "fin1_pass"),
 }
 
 # Values from the live PII matrix. Rotate with tests/test_pii_detection.py if the detector
@@ -56,6 +57,9 @@ ENGINEERING_QUESTION = (
     "Answer with one short sentence: what are the engineering security requirements?"
 )
 TERSE = "Answer with exactly one word and no punctuation: which department is this?"
+FINANCE_QUESTION = (
+    "Answer with one short sentence: what are the finance access and salary rules?"
+)
 
 # Substrings that must never appear in a client-visible error body or anywhere in the audit
 # tables. Checked case-insensitively.
@@ -68,6 +72,7 @@ LEAK_MARKERS = [
     "private key",
     "begin rsa",
     "emp1_pass",
+    "fin1_pass",
     "change_me_strong_password",
 ]
 
@@ -173,7 +178,7 @@ def raw_request_without_body(path, content_length, timeout=30):
     return status, response
 
 def collection_summary():
-    """Return (chunk_count, sorted list of (clearance_level, source_document)) from ChromaDB.
+    """Return (chunk_count, sorted list of (classification_level, source_document)) from ChromaDB.
 
     Used to prove the negative clearance assertions are not vacuous: the corpus really does
     contain higher-clearance chunks that emp1 must not be able to retrieve.
@@ -181,9 +186,9 @@ def collection_summary():
     code = (
         "import chromadb, json\n"
         "client = chromadb.HttpClient(host='chromadb', port=8000)\n"
-        "col = client.get_or_create_collection('paladin_docs')\n"
+        "col = client.get_or_create_collection('paladin_docs_abac')\n"
         "metas = col.get(include=['metadatas'])['metadatas']\n"
-        "pairs = sorted({(m['clearance_level'], m['source_document']) for m in metas})\n"
+        "pairs = sorted({(m['classification_level'], m['source_document']) for m in metas})\n"
         "print(json.dumps({'count': len(metas), 'pairs': pairs}))\n"
     )
     proc = subprocess.run(
@@ -260,14 +265,77 @@ def part2_clearance_isolation(tokens):
     admin_payload = json.loads(admin_body) if admin_status == 200 else {}
     admin_sources = set(admin_payload.get("sources") or [])
     record("admin1 (clearance 3) /ask succeeds", admin_status == 200, f"HTTP {admin_status}")
-    record("admin1's result set is a superset of emp1's (filter is monotonic in clearance)",
-           emp_sources <= admin_sources,
-           f"emp={sorted(emp_sources)} admin={sorted(admin_sources)}")
-    known = {"engineering_policy.txt", "hr_handbook.md", "finance_guidelines.txt",
-             "executive_briefing.md"}
-    record("admin1 receives only known corpus documents", admin_sources <= known,
+    # ABAC is NOT monotonic in clearance: an Executive (admin1) does not receive
+    # Engineering-scoped documents. The correct expectation is that admin1 sees its
+    # own department (Executive) plus company-wide docs, and never other departments
+    # department-scoped docs.
+    record("admin1 does NOT receive emp1's Engineering-scoped doc (dept scoping applies)",
+           "engineering_policy.txt" not in admin_sources,
+           f"admin={sorted(admin_sources)}")
+    record("admin1 receives only known corpus documents",
+           admin_sources <= {"engineering_policy.txt", "hr_handbook.md",
+                             "finance_guidelines.txt", "executive_briefing.md"},
            f"sources={sorted(admin_sources)}")
 
+
+
+def _abac_admitted_sources(department, clearance):
+    """Return the set of source_documents the real ABAC filter admits for a user.
+
+    Runs gateway.authz.policy.build_chroma_filter against the live collection so we
+    assert on the deployed predicate itself, not a reimplementation.
+    """
+    code = (
+        "import chromadb, json\n"
+        "from gateway.authz.policy import UserAttributes, build_chroma_filter\n"
+        f"user = UserAttributes({department!r}, {int(clearance)}, 'employee')\n"
+        "client = chromadb.HttpClient(host='chromadb', port=8000)\n"
+        "col = client.get_collection('paladin_docs_abac')\n"
+        "where = build_chroma_filter(user)\n"
+        "metas = col.get(where=where, include=['metadatas'])['metadatas']\n"
+        "sources = sorted({m['source_document'] for m in metas})\n"
+        "print(json.dumps(sources))\n"
+    )
+    proc = subprocess.run(
+        ["docker", "compose", "exec", "-T", "paladin-api", "python", "-"],
+        cwd=PROJECT_ROOT, input=code, capture_output=True, text=True, timeout=180,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ABAC admitted-sources query failed: {proc.stderr.strip()[-500:]}")
+    return set(json.loads(proc.stdout.strip().splitlines()[-1]))
+
+
+def part2b_finance_department_isolation(tokens):
+    print("\n=== 2b. Finance department isolation (fin1 vs mgr1) ===", flush=True)
+    # Deterministic: assert on the deployed ABAC filter. fin1 (Finance, clearance 2)
+    # must be admitted for finance_guidelines.txt; mgr1 (Engineering, same clearance)
+    # must not. This needs no LLM and proves the retrieval authorization decision.
+    fin_admitted = _abac_admitted_sources("Finance", 2)
+    mgr_admitted = _abac_admitted_sources("Engineering", 2)
+    record("ABAC filter admits finance_guidelines.txt for fin1 (Finance, clearance 2)",
+           "finance_guidelines.txt" in fin_admitted, f"fin_admitted={sorted(fin_admitted)}")
+    record("ABAC filter denies finance_guidelines.txt for mgr1 (Engineering, clearance 2)",
+           "finance_guidelines.txt" not in mgr_admitted, f"mgr_admitted={sorted(mgr_admitted)}")
+
+    # End-to-end retrieval via /ask. We assert on the returned `sources` (retrieved
+    # document metadata), NOT on the generated answer text.
+    fin_status, _, fin_body = http(
+        "POST", "/ask", params={"message": FINANCE_QUESTION}, token=tokens["fin1"],
+        timeout=1800,
+    )
+    fin_sources = set(json.loads(fin_body).get("sources") or []) if fin_status == 200 else set()
+    record("fin1 /ask (finance question) succeeds", fin_status == 200, f"HTTP {fin_status}")
+    record("fin1 retrieves finance_guidelines.txt",
+           "finance_guidelines.txt" in fin_sources, f"sources={sorted(fin_sources)}")
+
+    mgr_status, _, mgr_body = http(
+        "POST", "/ask", params={"message": FINANCE_QUESTION}, token=tokens["mgr1"],
+        timeout=1800,
+    )
+    mgr_sources = set(json.loads(mgr_body).get("sources") or []) if mgr_status == 200 else set()
+    record("mgr1 /ask (same finance question) succeeds", mgr_status == 200, f"HTTP {mgr_status}")
+    record("mgr1 does NOT retrieve finance_guidelines.txt",
+           "finance_guidelines.txt" not in mgr_sources, f"sources={sorted(mgr_sources)}")
 
 
 def part3_pii_and_injection(tokens):
@@ -623,6 +691,7 @@ def main():
 
     part1_lifecycle(tokens)
     part2_clearance_isolation(tokens)
+    part2b_finance_department_isolation(tokens)
     part3_pii_and_injection(tokens)
     part4_failure_modes(tokens)
     if "--no-disruption" in sys.argv:
