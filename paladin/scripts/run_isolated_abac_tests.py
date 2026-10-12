@@ -7,7 +7,7 @@ From the ``paladin/`` directory, run:
 The suite mixes two test frameworks, each executed by its own runner:
 
 * pytest-style files (``test_abac_policy``, ``test_abac_vector_store``,
-  ``test_ingest_manifest``) use ``pytest.mark.parametrize``, ``pytest.raises``
+  ``test_ingest_manifest``, ``test_seed_users``) use ``pytest.mark.parametrize``, ``pytest.raises``
   and the ``tmp_path`` fixture, so they are executed with pytest.
 * unittest-style files (``test_abac_secondary_denial``,
   ``test_ask_http_503_live``) are ``unittest.TestCase`` suites executed with
@@ -54,6 +54,7 @@ PYTEST_MODULES = (
     "tests/test_abac_policy.py",
     "tests/test_abac_vector_store.py",
     "tests/test_ingest_manifest.py",
+    "tests/test_seed_users.py",
 )
 # unittest-style suites: TestCase classes with skipUnless guards.
 UNITTEST_MODULES = (

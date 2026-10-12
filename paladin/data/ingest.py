@@ -42,6 +42,11 @@ class DocumentIngestor:
             os.path.dirname(os.path.abspath(__file__)), "manifest.json"
         )
         self.manifest = self._load_manifest()
+        # Verified document byte snapshots, keyed by manifest filename.
+        # Populated (and fully replaced) by _files() on every ingestion
+        # attempt so _process_file() consumes exactly the bytes that were
+        # hash-verified, with no re-read from disk in between.
+        self._verified_bytes: dict[str, bytes] = {}
         import chromadb
         from sentence_transformers import SentenceTransformer
 
@@ -82,21 +87,28 @@ class DocumentIngestor:
         self.digests = digests
         return parsed
 
-    def _files(self) -> list[str]:
+    def _files(self) -> dict[str, bytes]:
+        # State isolation: explicitly clear and fully replace the verified
+        # snapshots on every attempt so bytes from a prior attempt can never
+        # leak into this one.
+        self._verified_bytes = {}
         files = sorted(glob.glob(os.path.join(self.documents_dir, "*.*")))
         names = {os.path.basename(path) for path in files}
         if names != self.manifest.keys():
             raise ManifestError("document is missing from manifest")
+        verified: dict[str, bytes] = {}
         for path in files:
             name = os.path.basename(path)
             with open(path, "rb") as handle:
-                actual = _sha256_hex(handle.read())
-            if actual != self.digests.get(name):
+                data = handle.read()
+            if _sha256_hex(data) != self.digests.get(name):
                 raise ManifestError(f"document content does not match manifest digest: {name}")
-        return files
+            verified[name] = data
+        self._verified_bytes = verified
+        return verified
 
     def ingest_directory(self) -> int:
-        files = self._files()
+        verified = self._files()
         staging = self.client.get_or_create_collection(
             name=STAGING_COLLECTION, metadata={"hnsw:space": "cosine"}
         )
@@ -105,20 +117,20 @@ class DocumentIngestor:
             staging.delete(ids=existing["ids"])
 
         total_chunks = 0
-        for filepath in files:
-            total_chunks += self._process_file(staging, filepath)
+        for filename in sorted(verified):
+            total_chunks += self._process_file(staging, filename, verified[filename])
         self._validate_collection(staging, total_chunks)
         self._promote(staging)
         return total_chunks
 
-    def _process_file(self, collection: Any, filepath: str) -> int:
-        filename = os.path.basename(filepath)
+    def _process_file(self, collection: Any, filename: str, data: bytes) -> int:
         attributes = self.manifest[filename]
-        with open(filepath, "r", encoding="utf-8") as handle:
-            content = handle.read()
+        # Consume only the hash-verified snapshot passed in by _files();
+        # the source file is never re-read here, closing the TOCTOU gap.
+        content = data.decode("utf-8")
         chunks = (
             self._chunk_markdown(content)
-            if os.path.splitext(filepath)[1].lower() == ".md"
+            if os.path.splitext(filename)[1].lower() == ".md"
             else self._chunk_text(content)
         )
         for index, chunk_text in enumerate(chunks):

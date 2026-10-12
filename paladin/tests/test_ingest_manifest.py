@@ -18,6 +18,7 @@ def make_ingestor(tmp_path, manifest, content=KNOWN_CONTENT):
     ingestor = DocumentIngestor.__new__(DocumentIngestor)
     ingestor.documents_dir = str(documents)
     ingestor.manifest_path = str(manifest_path)
+    ingestor._verified_bytes = {}
     return ingestor
 
 
@@ -58,10 +59,12 @@ def test_chunk_ids_and_metadata_are_stable_for_reingestion(tmp_path):
             self.rows.append(kwargs)
 
     collection = Collection()
-    first_count = ingestor._process_file(collection, str(tmp_path / "documents" / "known.txt"))
+    verified = ingestor._files()
+    assert set(verified) == {"known.txt"}
+    first_count = ingestor._process_file(collection, "known.txt", verified["known.txt"])
     first = list(collection.rows)
     collection.rows.clear()
-    second_count = ingestor._process_file(collection, str(tmp_path / "documents" / "known.txt"))
+    second_count = ingestor._process_file(collection, "known.txt", verified["known.txt"])
     assert first_count == second_count
     assert [row["ids"] for row in first] == [row["ids"] for row in collection.rows]
     assert first[0]["metadatas"] == collection.rows[0]["metadatas"]
@@ -76,7 +79,22 @@ def test_valid_hash_is_accepted_and_files_returned(tmp_path):
     ingestor = make_ingestor(tmp_path, valid_manifest())
     ingestor.manifest = ingestor._load_manifest()
     assert ingestor.digests == {"known.txt": KNOWN_SHA256}
-    assert ingestor._files() == [str(tmp_path / "documents" / "known.txt")]
+    verified = ingestor._files()
+    assert verified == {"known.txt": KNOWN_CONTENT}
+    assert ingestor._verified_bytes == {"known.txt": KNOWN_CONTENT}
+
+
+def test_verified_state_is_replaced_not_accumulated(tmp_path):
+    # State isolation: a failed second attempt must not leave the first
+    # attempt's verified bytes behind.
+    ingestor = make_ingestor(tmp_path, valid_manifest())
+    ingestor.manifest = ingestor._load_manifest()
+    ingestor._files()
+    assert set(ingestor._verified_bytes) == {"known.txt"}
+    (tmp_path / "documents" / "known.txt").write_bytes(b"tampered after verify")
+    with pytest.raises(ManifestError):
+        ingestor._files()
+    assert ingestor._verified_bytes == {}
 
 
 def test_manifest_missing_hash_is_rejected(tmp_path):
@@ -114,3 +132,33 @@ def test_document_changed_after_hash_fails_closed(tmp_path):
     (tmp_path / "documents" / "known.txt").write_bytes(b"one two THREE tampered")
     with pytest.raises(ManifestError):
         ingestor._files()
+
+
+def test_ingested_content_cannot_differ_from_verified_snapshot(tmp_path):
+    # TOCTOU regression: capture the verified snapshot, then change the file
+    # on disk before processing. The ingested content must be the verified
+    # snapshot, not the tampered file.
+    ingestor = make_ingestor(tmp_path, valid_manifest())
+    ingestor.manifest = ingestor._load_manifest()
+    verified = ingestor._files()
+
+    class Encoded:
+        def tolist(self):
+            return [0.1, 0.2]
+
+    ingestor.model = type("Model", (), {"encode": lambda self, text: Encoded()})()
+
+    class Collection:
+        def __init__(self):
+            self.documents = []
+
+        def upsert(self, **kwargs):
+            self.documents.extend(kwargs["documents"])
+
+    collection = Collection()
+    (tmp_path / "documents" / "known.txt").write_bytes(b"tampered after verify")
+    ingestor._process_file(collection, "known.txt", verified["known.txt"])
+    assert collection.documents and all(
+        "tampered" not in text for text in collection.documents
+    )
+    assert any("one two three" in text for text in collection.documents)

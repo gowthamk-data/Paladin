@@ -115,8 +115,13 @@ Run this checklist before every `data/ingest.py` execution:
 3. **Regenerate the content hashes.** For every changed or added document, recompute
    `sha256(<file bytes>)` and update the matching `content_sha256` in
    `manifest.json`. Ingestion fails closed if any digest does not match.
+   Scope note: the digest is a hash of **document bytes only** — it does not
+   validate the classification fields (checked by you in step 2, enforced by
+   the ABAC policy at query time) and does not authenticate who approved.
 4. **Record the approval commit.** Commit the manifest (and document) change with the
    trailer `Approved-by: Gowtham K <YYYY-MM-DD> — Direction: tightened|broadened|unchanged`.
+   The trailer is a manual, non-cryptographically-enforced record — a
+   self-asserted line verified by review, not by code.
    For any change that broadens access, also write the one-paragraph rationale in the
    commit message.
 5. **Only then run ingestion.** `docker compose exec -T -e PYTHONPATH=/app paladin-api

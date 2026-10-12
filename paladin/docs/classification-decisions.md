@@ -30,6 +30,17 @@ file.
 | `executive_briefing.md` | 3 | Executive | department | Board decisions, M&A, executive compensation, security-critical infrastructure — Level 3 (serious strategic/reputational harm). Scoped to Executive. |
 | `hr_handbook.md` | 2 | HR | company-wide | Conduct, data-handling, and personnel guidance — Level 2 content, but intended for all employees, so visibility is `company-wide` (department check waived by policy). |
 
+### What `company-wide` does and does not waive
+
+`visibility: "company-wide"` removes the **department** restriction only. The
+**clearance gate still applies**: a user whose clearance is below the
+document's level is denied even when visibility is `company-wide`. Concretely,
+`emp1` (clearance 1) is denied the Level 2 HR handbook
+(`INSUFFICIENT_CLEARANCE`), while `mgr1` (clearance 2, same department as
+`emp1`) is allowed. This is asserted by
+`test_company_wide_still_requires_clearance` in
+`tests/test_abac_policy.py`, and the four labels above are unchanged by it.
+
 Document wording alone does **not** determine classification or intended audience.
 A document that *says* "all employees" is not automatically `company-wide`, and a
 document that *says* "confidential" is not automatically Level 3. Classification
@@ -78,19 +89,54 @@ explain why widening the audience is acceptable for that document's content.
 
 ## Content-hash binding (`content_sha256`)
 
-Each manifest entry carries `content_sha256`, the SHA-256 of the document's exact
-bytes. Ingestion (`data/ingest.py`) requires a well-formed digest for every entry
-and recomputes it from the file before ingesting, failing closed on any mismatch.
+`content_sha256` is a SHA-256 **cryptographic hash of document bytes only**.
+Ingestion (`data/ingest.py`) requires a well-formed lowercase-hex digest for
+every entry, recomputes it from the exact bytes on disk, and fails closed on
+any mismatch. Verified bytes are passed as snapshots to the chunking stage, so
+the ingested content cannot differ from the verified bytes even if the file
+changes mid-run; `_verified_bytes` state is cleared and fully replaced at the
+start of every ingestion attempt.
 
-The digest binds an approval to the specific bytes that were approved: if the
-document changes after approval, the stored digest no longer matches and ingestion
-stops until the owner re-reviews and updates the manifest (with a new
-`Approved-by` trailer). **The hash does not authenticate who approved the change**
-— it only proves the approved bytes are the bytes being ingested. Identity and
-intent come solely from the commit trailer and the owner's own process.
+Scope limits (read carefully):
+
+- The digest does **not** validate classification fields. `level`,
+  `department`, and `visibility` are enforced only by owner review
+  (checklist below) and by the ABAC policy at query time.
+- The digest is **not an authenticated signature**. It binds an approval to
+  the specific bytes that were approved — if the document changes after
+  approval, the stored digest no longer matches and ingestion stops until the
+  owner re-reviews and updates the manifest (with a new `Approved-by`
+  trailer) — but it cannot prove *who* approved.
+- The commit trailer is a **manual, non-cryptographically-enforced approval
+  record**: a self-asserted text line in the git history, verified by human
+  review, not by code. Identity and intent come solely from the commit
+  trailer and the owner's own process. Independent verification of approval
+  identity is future work (below).
+
+No second hash is added to the manifest for approval authentication: a hash
+over the classification fields would attest to *what* was approved but still
+could not attest to *who* approved it, so it would add complexity without
+closing the identity gap. Metadata-integrity protection beyond the digest is
+therefore deferred to the multi-operator stage, where approver signatures
+could carry a clear, tested purpose.
 
 ## Future work
 
 - Multi-operator approval enforcement (two-person rule for broadening changes,
   CODEOWNERS/CI gate) if the project grows past a solo owner.
 - Independent verification of approval identity (the trailer is self-asserted).
+
+## Known limitation: staged-to-active promotion (assessed, not redesigned)
+
+`_promote()` in `data/ingest.py` deletes all rows in the active collection
+first and then upserts the validated staging rows. A failure between the
+delete and the upsert — process crash, Chroma error, or network drop — can
+leave the active collection **empty or partial**, with retrieval degraded or
+empty until ingestion is rerun successfully. Scope: this affects only
+availability of served documents during/after a failed promotion; it cannot
+widen access (only previously validated rows are ever promoted, and the ABAC
+policy still filters whatever is present). Mitigation today is operational:
+rerun `data/ingest.py` after any failed run and confirm chunk counts in the
+ingest output before serving. A redesign (e.g., promote-before-delete) is
+deliberately out of scope here; it would need focused failure-path tests and
+is recorded as future work.
