@@ -200,7 +200,11 @@ def ask(
             )
             db.commit()
             raise HTTPException(status_code=403, detail="Access denied") from exc
-        vector_store = VectorStore()
+        # The request's DB session is passed in so VectorStore resolves the
+        # authoritative active-generation pointer on the connection that is
+        # already a hard dependency of /ask; an unreachable pointer store
+        # therefore fails closed here as a 503, never to a stale collection.
+        vector_store = VectorStore(db)
         model = get_embedding_model()
         query_embedding = model.encode(redacted_prompt).tolist()
         results = vector_store.query(query_embedding, current_user, n_results=5)

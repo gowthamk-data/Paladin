@@ -126,17 +126,58 @@ could carry a clear, tested purpose.
   CODEOWNERS/CI gate) if the project grows past a solo owner.
 - Independent verification of approval identity (the trailer is self-asserted).
 
-## Known limitation: staged-to-active promotion (assessed, not redesigned)
+## Versioned-generation promotion (current implementation)
 
-`_promote()` in `data/ingest.py` deletes all rows in the active collection
-first and then upserts the validated staging rows. A failure between the
-delete and the upsert — process crash, Chroma error, or network drop — can
-leave the active collection **empty or partial**, with retrieval degraded or
-empty until ingestion is rerun successfully. Scope: this affects only
-availability of served documents during/after a failed promotion; it cannot
-widen access (only previously validated rows are ever promoted, and the ABAC
-policy still filters whatever is present). Mitigation today is operational:
-rerun `data/ingest.py` after any failed run and confirm chunk counts in the
-ingest output before serving. A redesign (e.g., promote-before-delete) is
-deliberately out of scope here; it would need focused failure-path tests and
-is recorded as future work.
+`data/ingest.py` no longer promotes by mutating a live collection. Every
+ingestion builds a **new, immutable generation collection**
+(`paladin_docs_abac_gen_NNNNNN`), validates it in full, and only then flips the
+authoritative pointer — the single `is_active` row in the PostgreSQL
+`vector_generations` table — inside one transaction. Cutover is therefore a
+pointer flip, never a copy and never an in-place rewrite.
+
+Guarantees this gives, each covered by tests in
+`tests/test_generation_cutover.py` and `tests/test_generation_pointer.py`:
+
+- **A half-built generation is never served.** Until the flip, the new
+  collection is invisible; queries resolve only the active generation. A
+  failure at any point before the flip (chunking, validation, empty result,
+  unregistered activation) leaves the previous generation serving untouched.
+- **No mixed old/new rows.** A request resolves the generation once, before it
+  queries, so it cannot observe a partially replaced index.
+- **A failed run leaves no partial state.** The un-activated generation is
+  discarded best-effort (collection then row); a later run's retention pass
+  sweeps anything left behind.
+- **Rollback is safe and verified.** `--rollback` flips to the most recently
+  deactivated generation, and only after probing that its collection still
+  exists in Chroma; a missing target is refused with the pointer untouched and
+  the row retained for a restored collection.
+- **Retention protects rollback and in-flight requests.** Cleanup keeps the
+  active generation, the rollback target, the legacy bootstrap collection, and
+  any generation whose `deactivated_at` (the timestamp stamped at cutover) is
+  less than `INGEST_IN_USE_GRACE_SECONDS` (900s) ago — the gateway resolves the
+  pointer per request, so a request that opened a generation just before a
+  cutover can still be reading it. The window runs from deactivation, not
+  activation, so a generation that served for weeks keeps its full grace
+  period after losing the pointer. Cleanup is best-effort, never fatal, and
+  retried on every run.
+- **The one-active invariant is enforced by the database.** A partial unique
+  index keyed on `is_active` (not on `name`, which only forbade a duplicated
+  active name) makes two active rows impossible; `acquire()` replaces an index
+  of the older shape and migrates columns introduced after the first
+  deployment (`deactivated_at`) in place, because `create_all` never alters an
+  existing table. If a pre-existing table already holds multiple active rows
+  the new index cannot be created — deliberate fail-closed behaviour: the
+  operator must resolve the corrupt state first.
+- **Ingestion is serialised.** A PostgreSQL session-level advisory lock
+  refuses concurrent runs; the lock and the connection are released on every
+  failure path, including a failed bootstrap.
+- **Pointer failures fail closed.** A pointer table with rows but no active row
+  is treated as corrupt (503), not as "no pointer yet"; only a genuinely
+  missing table (driver `SQLSTATE 42P01`, or SQLite's `no such table`) resolves
+  to the legacy fallback.
+
+Residual limitation (unchanged in kind from the previous design): promotion
+still depends on the pointer store. If PostgreSQL is unreachable the gateway
+fails closed as unavailable rather than serving a stale collection — an
+availability trade-off, not an access one. The ABAC policy filters whatever
+rows are present, so no failure mode here can widen access.

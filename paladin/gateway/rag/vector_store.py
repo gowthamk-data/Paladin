@@ -3,15 +3,38 @@ from typing import Any
 from gateway.authz.policy import UserAttributes, authorize, build_chroma_filter
 from gateway.config import CHROMADB_HOST, CHROMADB_PORT, CHROMA_COLLECTION
 from gateway.errors import AuthorizationDeniedError, ServiceUnavailableError
+from gateway.rag.generations import read_active_generation
 
 
 class VectorStore:
-    def __init__(self, collection_name: str = CHROMA_COLLECTION):
+    """Read-only handle onto exactly one active generation collection.
+
+    Construction (once per /ask request) resolves the authoritative
+    active-generation pointer in PostgreSQL and opens that generation's
+    collection. A generation is only ever pointed at after it has been fully
+    built and validated by ingestion, so a request never sees a mix of old
+    and new rows; a request that resolved before a cutover finishes against
+    the prior generation, which ingestion retains for rollback. With no
+    pointer row yet (pre-versioning deployment), the legacy collection name
+    is served; with the pointer store or the collection unreachable, the
+    store fails closed as unavailable rather than guessing.
+    """
+
+    def __init__(self, db=None, collection_name: str = CHROMA_COLLECTION):
+        """Bind to the request's DB session first, collection name second.
+
+        The session is positional-first on purpose: ``query_routes.py`` calls
+        ``VectorStore(db)``, and an earlier signature with ``collection_name``
+        first silently bound the Session as the collection name. Keeping the
+        legacy fallback as an explicit keyword preserves the old behaviour
+        for any non-route caller.
+        """
         import chromadb
 
         try:
             self.client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
-            self.collection = self.client.get_collection(name=collection_name)
+            self.generation = read_active_generation(db) or collection_name
+            self.collection = self.client.get_collection(name=self.generation)
         except ServiceUnavailableError:
             raise
         except Exception as exc:

@@ -1,5 +1,5 @@
 import sqlalchemy as sa
-from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 import uuid
 from datetime import datetime
@@ -47,6 +47,35 @@ class DenialLog(Base):
     reason_code = Column(String(40), nullable=False)
     reason_detail = Column(Text)
     sanitized_prompt = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class GenerationRow(Base):
+    """Authoritative pointer state for versioned Chroma generation collections.
+
+    One row per generation collection managed by ``data/ingest.py``. At most
+    one row may have ``is_active = true`` at any time, enforced by a partial
+    unique index on the flag itself (created and migrated by
+    ``gateway.rag.generations.GenerationStore.acquire``) — not merely by the
+    single-transaction flip, which cannot protect against a manually edited
+    or partially migrated table. ``activated_at`` is NULL until a generation
+    has been active once; its ordering identifies the most recently deactivated
+    generation, which is the rollback target. ``deactivated_at`` records when a
+    generation lost the pointer: the in-use grace window for retention is
+    measured from it, so a generation that served for weeks keeps its full
+    grace period after cutover instead of being reclaimable immediately.
+    """
+
+    __tablename__ = "vector_generations"
+
+    name = Column(String(255), primary_key=True)
+    is_active = Column(Boolean, nullable=False, default=False, server_default="false")
+    activated_at = Column(DateTime, nullable=True)
+    # Set when a generation loses the pointer. Retention's in-use grace window
+    # is measured from this timestamp, not from ``activated_at``, so a
+    # long-serving generation is not reclaimable the moment it is superseded.
+    # NULL for a generation that was never active, or is currently active.
+    deactivated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

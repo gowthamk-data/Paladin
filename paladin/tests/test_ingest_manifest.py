@@ -2,8 +2,11 @@ import hashlib
 import json
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from data.ingest import DocumentIngestor, ManifestError
+from tests.generation_test_support import FakeChromaClient, SQLiteGenerationStore
 
 KNOWN_CONTENT = b"one two three"
 KNOWN_SHA256 = hashlib.sha256(KNOWN_CONTENT).hexdigest()
@@ -167,8 +170,8 @@ def test_ingested_content_cannot_differ_from_verified_snapshot(tmp_path):
 
 def test_ingest_directory_uses_verified_snapshots_end_to_end(tmp_path):
     # Isolated end-to-end: bytes verified by _files() must be the bytes that
-    # reach processing, staging validation, and promotion. Fake Chroma
-    # collections and a mock embedding model: no live Compose stack.
+    # reach processing, validation, and the activated generation. Fake Chroma
+    # client, SQLite pointer store, and a mock embedding model: no live stack.
     ingestor = make_ingestor(tmp_path, valid_manifest())
     ingestor.manifest = ingestor._load_manifest()
 
@@ -177,7 +180,7 @@ def test_ingest_directory_uses_verified_snapshots_end_to_end(tmp_path):
     def mutating_process_file(collection, filename, data):
         # Mutate the source file mid-run, after _files() verified it but
         # before processing consumes the snapshot. Production code never
-        # re-reads the file, so tampered bytes must never reach staging.
+        # re-reads the file, so tampered bytes must never reach the generation.
         (tmp_path / "documents" / filename).write_bytes(b"tampered after verify")
         return real_process_file(collection, filename, data)
 
@@ -188,53 +191,16 @@ def test_ingest_directory_uses_verified_snapshots_end_to_end(tmp_path):
             return [0.1, 0.2]
 
     ingestor.model = type("Model", (), {"encode": lambda self, text: Encoded()})()
-
-    class FakeCollection:
-        def __init__(self):
-            self.rows = []
-
-        def upsert(self, **kwargs):
-            ids = kwargs["ids"]
-            for index, doc_id in enumerate(ids):
-                self.rows.append(
-                    {
-                        "ids": doc_id,
-                        "embeddings": kwargs["embeddings"][index],
-                        "documents": kwargs["documents"][index],
-                        "metadatas": kwargs["metadatas"][index],
-                    }
-                )
-
-        def get(self, include=None):
-            return {
-                "ids": [row["ids"] for row in self.rows],
-                "embeddings": [row["embeddings"] for row in self.rows],
-                "documents": [row["documents"] for row in self.rows],
-                "metadatas": [row["metadatas"] for row in self.rows],
-            }
-
-        def delete(self, ids):
-            self.rows = [row for row in self.rows if row["ids"] not in ids]
-
-    staging, active = FakeCollection(), FakeCollection()
-
-    class FakeClient:
-        def get_or_create_collection(self, **kwargs):
-            if kwargs.get("name").endswith("_staging"):
-                return staging
-            return active
-
-        def create_collection(self, **kwargs):
-            if kwargs.get("name").endswith("_staging"):
-                return staging
-            return active
-
-        def get_collection(self, **kwargs):
-            if kwargs.get("name").endswith("_staging"):
-                return staging
-            raise Exception("active collection does not exist yet")
-
-    ingestor.client = FakeClient()
+    client = FakeChromaClient()
+    ingestor.client = client
+    store = SQLiteGenerationStore(
+        create_engine(
+            "sqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+    )
+    ingestor.store = store
 
     real_validate = ingestor._validate_collection
     validate_calls = []
@@ -247,14 +213,20 @@ def test_ingest_directory_uses_verified_snapshots_end_to_end(tmp_path):
 
     total = ingestor.ingest_directory()
 
-    # 1. Chunk count: the returned total must equal what staging holds, and
-    #    staged validation must have been invoked exactly once with that count.
+    # 1. Chunk count: the returned total must equal what the activated
+    #    generation holds, and validation must have run exactly once.
     assert total > 0, "expected at least one chunk from the fixture document"
-    assert total == len(staging.rows), (
-        f"returned count {total} != staged rows {len(staging.rows)}"
+    store.acquire()
+    try:
+        active_name = store.active_name()
+    finally:
+        store.release()
+    rows = list(client.collections[active_name].store.values())
+    assert total == len(rows), (
+        f"returned count {total} != activated rows {len(rows)}"
     )
     assert validate_calls == [total], (
-        f"staged validation not invoked with the expected count: {validate_calls}"
+        f"generation validation not invoked with the expected count: {validate_calls}"
     )
 
     # The mid-run mutation really happened, so the assertions below are
@@ -263,34 +235,216 @@ def test_ingest_directory_uses_verified_snapshots_end_to_end(tmp_path):
         b"tampered after verify"
     )
 
-    # 2. Verified bytes only: tampered bytes never reached staging, while the
-    #    verified snapshot text did.
-    assert staging.rows, "staging collection received no chunks"
+    # 2. Verified bytes only: tampered bytes never reached the activated
+    #    generation, while the verified snapshot text did.
+    assert rows, "activated generation received no chunks"
     assert all(
-        "tampered" not in row["documents"] for row in staging.rows
-    ), "unverified bytes reached staging"
-    assert any("one two three" in row["documents"] for row in staging.rows)
+        "tampered" not in row["documents"] for row in rows
+    ), "unverified bytes reached the activated generation"
+    assert any("one two three" in row["documents"] for row in rows)
 
-    # 3. Deep promotion comparison: every active row must exactly equal its
-    #    staging row (ids, documents, embeddings, metadata), so any dropped
-    #    or altered row during promotion fails the test.
-    assert len(active.rows) == len(staging.rows) == total, (
-        "promotion did not carry every verified chunk to active"
+    # 3. Content check: every activated row carries the verified chunk with
+    #    its embeddings and ABAC metadata (a dropped or altered row fails).
+    assert len(rows) == total, (
+        "activation did not carry every verified chunk"
     )
-    staged_by_id = {row["ids"]: row for row in staging.rows}
-    active_by_id = {row["ids"]: row for row in active.rows}
-    assert set(active_by_id) == set(staged_by_id), (
-        "active chunk IDs differ from staging chunk IDs"
-    )
-    for doc_id, staged_row in staged_by_id.items():
-        active_row = active_by_id[doc_id]
-        assert active_row["documents"] == staged_row["documents"], doc_id
-        assert active_row["embeddings"] == staged_row["embeddings"] == (
-            [0.1, 0.2]
-        ), doc_id
-        assert active_row["metadatas"] == staged_row["metadatas"], doc_id
-    for row in active.rows:
+    for row in rows:
+        assert row["documents"] == "one two three"
+        assert row["embeddings"] == [0.1, 0.2]
         assert row["metadatas"]["source_document"] == "known.txt"
         assert row["metadatas"]["classification_level"] == 1
         assert row["metadatas"]["department"] == "Engineering"
         assert row["metadatas"]["visibility"] == "department"
+
+
+# ---------------------------------------------------------------------------
+# Activation failure-safety. Cutover is a pointer flip, not a copy, so the
+# previous generation keeps serving through every failure mode below. The
+# same guarantees are exercised against the real GenerationStore flow in
+# tests/test_generation_cutover.py; these manifest-level tests pin the
+# ingestor-side behavior (refuse-before-activate, no half-built state).
+# ---------------------------------------------------------------------------
+
+
+
+def test_removed_documents_converge_on_reingestion(tmp_path):
+    """Removed documents converge: each generation is built fresh from the
+    current manifest, so a document dropped from the manifest disappears from
+    the newly activated generation."""
+    first_manifest = valid_manifest()
+    first_manifest["retired.txt"] = {
+        "classification_level": 1,
+        "department": "Engineering",
+        "visibility": "department",
+        "content_sha256": hashlib.sha256(b"removed document").hexdigest(),
+    }
+    ingestor = make_ingestor(tmp_path, first_manifest)
+    (tmp_path / "documents" / "retired.txt").write_bytes(b"removed document")
+    ingestor.manifest = ingestor._load_manifest()
+
+    class Encoded:
+        def tolist(self):
+            return [0.1, 0.2]
+
+    ingestor.model = type("Model", (), {"encode": lambda self, text: Encoded()})()
+    client = FakeChromaClient()
+    ingestor.client = client
+    store = SQLiteGenerationStore(
+        create_engine(
+            "sqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+    )
+    ingestor.store = store
+    ingestor.ingest_directory()
+
+    # Drop retired.txt from the manifest and the corpus, then re-ingest: the
+    # new generation must hold only known.txt rows.
+    (tmp_path / "documents" / "retired.txt").unlink()
+    second_manifest = valid_manifest()
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(second_manifest), encoding="utf-8"
+    )
+    ingestor.manifest = ingestor._load_manifest()
+    ingestor.ingest_directory()
+
+    store.acquire()
+    try:
+        active_name = store.active_name()
+    finally:
+        store.release()
+    rows = list(client.collections[active_name].store.values())
+    assert rows
+    assert {row["metadatas"]["source_document"] for row in rows} == {"known.txt"}
+    assert all(row["documents"] == "one two three" for row in rows)
+
+
+def test_processing_failure_before_activation_keeps_previous_generation(tmp_path):
+    """A document-processing crash must leave the previously activated
+    generation serving: no pointer flip is attempted after the failure."""
+    ingestor = make_ingestor(
+        tmp_path,
+        {
+            "known.txt": {
+                "classification_level": 1,
+                "department": "Engineering",
+                "visibility": "department",
+                "content_sha256": KNOWN_SHA256,
+            },
+            "boom.txt": {
+                "classification_level": 1,
+                "department": "Engineering",
+                "visibility": "department",
+                "content_sha256": hashlib.sha256(b"secondary").hexdigest(),
+            },
+        },
+    )
+    (tmp_path / "documents" / "boom.txt").write_bytes(b"secondary")
+    ingestor.manifest = ingestor._load_manifest()
+
+    class Encoded:
+        def tolist(self):
+            return [0.1, 0.2]
+
+    ingestor.model = type("Model", (), {"encode": lambda self, text: Encoded()})()
+    client = FakeChromaClient()
+    ingestor.client = client
+    store = SQLiteGenerationStore(
+        create_engine(
+            "sqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+    )
+    ingestor.store = store
+
+    # A healthy first run so there is a serving generation to protect.
+    ingestor.ingest_directory()
+    store.acquire()
+    try:
+        serving_name = store.active_name()
+    finally:
+        store.release()
+    serving_docs = list(client.collections[serving_name].store.values())
+
+    real_process = ingestor._process_file
+
+    def flaky_process(collection, filename, data):
+        if filename == "boom.txt":
+            raise RuntimeError("boom-process")
+        return real_process(collection, filename, data)
+
+    ingestor._process_file = flaky_process
+
+    with pytest.raises(RuntimeError, match="boom-process"):
+        ingestor.ingest_directory()
+    # No pointer flip: the previously activated generation still serves,
+    # untouched, with its original rows.
+    store.acquire()
+    try:
+        assert store.active_name() == serving_name
+    finally:
+        store.release()
+    assert list(client.collections[serving_name].store.values()) == serving_docs
+
+
+def test_validation_failure_before_activation_keeps_previous_generation(tmp_path):
+    """A generation-validation failure must not flip the pointer: the
+    previously activated generation keeps serving."""
+    ingestor = make_ingestor(tmp_path, valid_manifest())
+    ingestor.manifest = ingestor._load_manifest()
+
+    class Encoded:
+        def tolist(self):
+            return [0.1, 0.2]
+
+    ingestor.model = type("Model", (), {"encode": lambda self, text: Encoded()})()
+    client = FakeChromaClient()
+    ingestor.client = client
+    store = SQLiteGenerationStore(
+        create_engine(
+            "sqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+    )
+    ingestor.store = store
+
+    # A healthy first run so there is a serving generation to protect.
+    ingestor.ingest_directory()
+    store.acquire()
+    try:
+        serving_name = store.active_name()
+    finally:
+        store.release()
+
+    real_validate = ingestor._validate_collection
+
+    def bad_validate(collection, expected_chunks):
+        collection.upsert(
+            ids=["rogue::chunk-9"],
+            embeddings=[[0.0, 0.0]],
+            documents=["rogue"],
+            metadatas=[
+                {
+                    "source_document": "unknown.txt",
+                    "chunk_index": 9,
+                    "classification_level": 1,
+                    "department": "Engineering",
+                    "visibility": "department",
+                }
+            ],
+        )
+        return real_validate(collection, expected_chunks + 1)
+
+    ingestor._validate_collection = bad_validate
+
+    with pytest.raises(ManifestError):
+        ingestor.ingest_directory()
+    # No pointer flip: the previously activated generation still serves.
+    store.acquire()
+    try:
+        assert store.active_name() == serving_name
+    finally:
+        store.release()
