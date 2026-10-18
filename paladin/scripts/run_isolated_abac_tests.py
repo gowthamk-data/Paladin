@@ -7,8 +7,10 @@ From the ``paladin/`` directory, run:
 The suite mixes two test frameworks, each executed by its own runner:
 
 * pytest-style files (``test_abac_policy``, ``test_abac_vector_store``,
-  ``test_ingest_manifest``, ``test_seed_users``) use ``pytest.mark.parametrize``, ``pytest.raises``
-  and the ``tmp_path`` fixture, so they are executed with pytest.
+  ``test_ingest_manifest``, ``test_generation_pointer``,
+  ``test_generation_cutover``, ``test_seed_users``) use ``pytest.mark.parametrize``,
+  ``pytest.raises`` and the ``tmp_path`` fixture, so they are executed with
+  pytest.
 * unittest-style files (``test_abac_secondary_denial``,
   ``test_ask_http_503_live``) are ``unittest.TestCase`` suites executed with
   ``python -m unittest``.
@@ -32,8 +34,17 @@ Isolation guarantees:
   * the disposable container removes itself (``--rm``) and the temporary
     wheelhouse is deleted in the runner's cleanup block
 
-False-positive guard: pytest exit code 5 ("no tests collected") and a
-"Ran 0 tests" unittest summary are reported as failures, never as success.
+Parser contract (Task 2 -- fail closed):
+  * ``parse_test_counts`` separately counts passed / skipped / failed tests.
+  * A recognised result summary is parsed exactly: "OK" summaries,
+    "OK (skipped=N)", "FAILED (failures=N, errors=N, skipped=N)".
+  * An absent or unrecognised summary (missing "OK"/"FAILED" line, truncated
+    or malformed output) is classified as FAILED: the run produced no
+    certified result, so it is never reported as success and the process
+    exit status is non-zero (exit 1 for failed, exit 3 for incomplete
+    verification when tests ran but the outcome was not reported).
+  * Missing or unparseable summary: every test that ran counts as failed and
+    the returned dict carries ``unparseable: 1``.
 """
 
 from __future__ import annotations
@@ -54,7 +65,10 @@ PYTEST_MODULES = (
     "tests/test_abac_policy.py",
     "tests/test_abac_vector_store.py",
     "tests/test_ingest_manifest.py",
+    "tests/test_generation_pointer.py",
+    "tests/test_generation_cutover.py",
     "tests/test_seed_users.py",
+    "tests/test_runner_reporting.py",
 )
 # unittest-style suites: TestCase classes with skipUnless guards.
 UNITTEST_MODULES = (
@@ -72,6 +86,21 @@ ENV = {
 }
 
 PYTEST_NO_TESTS_COLLECTED_EXIT = 5
+# ---------------------------------------------------------------------------
+# Fail-closed parser (Task 2): shapes recognised by the parser.
+# ---------------------------------------------------------------------------
+
+# "Ran 3 tests" / "Ran 3 tests in 0.001s"
+_UNITTEST_RAN_RE = re.compile(r"^Ran (\d+) tests?\b", re.MULTILINE)
+# "OK" or "OK (skipped=2)"
+_UNITTEST_OK_RE = re.compile(r"^OK(?: \(skipped=(\d+)\))?$", re.MULTILINE)
+# "FAILED (failures=1)" / "FAILED (failures=1, errors=2)" /
+# "FAILED (failures=1, errors=2, skipped=1)"
+_UNITTEST_FAILED_RE = re.compile(
+    r"^FAILED \(failures=(\d+)(?:, errors=(\d+))?(?:, skipped=(\d+))?\)$",
+    re.MULTILINE,
+)
+
 
 
 def run(command: list[str]) -> int:
@@ -120,6 +149,210 @@ def download_pytest_wheels(destination: Path) -> bool:
         )
         == 0
     )
+
+
+def _parse_pytest_counts(output: str) -> dict[str, int]:
+    """Parse a pytest terminal summary into separately counted totals.
+
+    Recognised shapes: ``48 passed in 3.5s``, ``2 failed, 3 skipped, 45
+    passed in 4.1s``, ``1 failed, 2 errors, 47 passed in 4.1s`` (errors are
+    folded into failed). Any absent or unrecognised summary (truncated
+    output, crash without a summary, plain text) is fail-closed: no count is
+    fabricated, so the result can never certify success.
+    """
+    counts = {"passed": 0, "skipped": 0, "failed": 0, "unparseable": 0}
+    matched = False
+
+    for kind in ("passed", "skipped", "failed"):
+        match = re.search(rf"(\d+) {kind}", output)
+        if match:
+            counts[kind] = int(match.group(1))
+            matched = True
+
+    # "1 failed, 2 errors, 47 passed in 4.1s" -> errors fold into failed.
+    error_match = re.search(r"(\d+) error", output)
+    if error_match:
+        counts["failed"] += int(error_match.group(1))
+        matched = True
+
+    if not matched:
+        counts["unparseable"] = 1
+    return counts
+
+
+def _parse_unittest_counts(output: str) -> dict[str, int]:
+    """Parse a unittest summary into separately counted totals.
+
+    Recognised shapes: ``Ran 3 tests`` + ``OK``, ``Ran 4 tests`` + ``OK
+    (skipped=2)``, ``Ran 6 tests`` + ``FAILED (failures=1, errors=2,
+    skipped=1)``. Anything else -- missing summary, truncated summary,
+    malformed summary -- is fail-closed: the outcome is unclassified and the
+    run is reported as failed (non-zero exit), never as a pass.
+    """
+    counts = {"passed": 0, "skipped": 0, "failed": 0, "unparseable": 0}
+
+    ran = _UNITTEST_RAN_RE.search(output)
+    if not ran:
+        # Zero tests were ever reported. The verdict layer treats this as a
+        # collector failure (exit 1); nothing further to parse here.
+        return counts
+
+    total = int(ran.group(1))
+    ok = _UNITTEST_OK_RE.search(output)
+    failed_summary = _UNITTEST_FAILED_RE.search(output)
+
+    if ok:
+        skipped = int(ok.group(1)) if ok.group(1) else 0
+        counts["passed"] = max(total - skipped, 0)
+        counts["skipped"] = skipped
+        return counts
+
+    if failed_summary:
+        failures = int(failed_summary.group(1))
+        errors = int(failed_summary.group(2)) if failed_summary.group(2) else 0
+        skipped = int(failed_summary.group(3)) if failed_summary.group(3) else 0
+        counts["passed"] = max(total - failures - errors - skipped, 0)
+        counts["skipped"] = skipped
+        counts["failed"] = failures + errors
+        return counts
+
+    # "Ran N tests" with no OK/FAILED line (missing, truncated or malformed
+    # summary): every test ran but none of their outcomes were reported, so
+    # the results are unclassified. Fail-closed: they count as failed and the
+    # unparseable flag records why.
+    counts["unparseable"] = 1
+    counts["failed"] = total
+    return counts
+
+
+def parse_test_counts(output: str, framework: str) -> dict[str, int]:
+    """Extract passed/skipped/failed counts from a runner's summary line.
+
+    pytest's terminal summary looks like ``48 passed, 2 skipped in 3.5s``
+    (or ``1 failed, 2 errors, 47 passed``); unittest's is ``Ran 3 tests``
+    plus ``OK`` / ``OK (skipped=1)`` / ``FAILED (failures=1, errors=2,
+    skipped=1)``. Fail closed: an absent or unrecognised result summary is
+    classified as failed and flagged ``unparseable: 1`` -- an unparseable
+    result is never counted as a pass, and the process exit status is
+    non-zero. The parser separately counts passed, skipped and failed tests.
+    """
+    counts = {"passed": 0, "skipped": 0, "failed": 0, "unparseable": 0}
+    if framework == "pytest":
+        return _parse_pytest_counts(output)
+    return _parse_unittest_counts(output)
+
+
+# Per-runner verdicts. A run is a PASS only when every collected test
+# executed and passed; INCOMPLETE when tests executed but some were skipped
+# (a skipped suite is an unverified suite, so the run must not claim complete
+# verification); FAILED for a failure/error or zero collected tests.
+RUN_PASS = "pass"
+RUN_INCOMPLETE = "incomplete-verification"
+RUN_FAILED = "failed"
+
+
+def _as_match_value(value, default=0):
+    """Normalize the ``collected`` arg to an integer item count.
+
+    ``main()`` passes a compiled regex match; unit tests may pass either the
+    raw summary string or the match object.
+    """
+    if value is None:
+        return default
+    try:
+        return int(value.group(1))
+    except AttributeError:
+        match = re.search(r"(\d+)", str(value))
+        return int(match.group(1)) if match else default
+
+
+def classify_pytest(counts, exit_code, collected):
+    """Classify a pytest run: ``(status, message)``."""
+    if exit_code == PYTEST_NO_TESTS_COLLECTED_EXIT:
+        return RUN_FAILED, (
+            "FAIL: pytest collected zero tests (exit code 5); refusing to "
+            "report success."
+        )
+    if exit_code:
+        return RUN_FAILED, f"FAIL: the pytest runner exited with {exit_code}."
+    if not collected or _as_match_value(collected) == 0:
+        return RUN_FAILED, (
+            "FAIL: pytest reported zero collected items despite exit code 0; "
+            "refusing to report success."
+        )
+    if counts["failed"]:
+        return RUN_FAILED, (
+            f"FAIL: {counts['failed']} pytest test(s) failed or errored."
+        )
+    if counts["skipped"]:
+        if counts["passed"] == 0:
+            return RUN_INCOMPLETE, (
+                "INCOMPLETE VERIFICATION: every pytest test was skipped "
+                f"({counts['skipped']} skipped, 0 executed); nothing was "
+                "verified, so this run is not a pass (exit 3)."
+            )
+        return RUN_INCOMPLETE, (
+            f"INCOMPLETE VERIFICATION: {counts['skipped']} pytest test(s) were "
+            f"skipped ({counts['passed']} passed); a skipped suite is an "
+            "unverified suite, so this run cannot claim complete "
+            "verification (exit 3)."
+        )
+    if counts["passed"] == 0:
+        return RUN_FAILED, (
+            "FAIL: pytest reported no executed tests; refusing to report "
+            "success."
+        )
+    return RUN_PASS, f"pytest: {counts['passed']} passed, 0 skipped, 0 failed."
+
+
+def classify_unittest(counts, exit_code, ran):
+    """Classify a unittest run: ``(status, message)``."""
+    if not ran or _as_match_value(ran) == 0:
+        return RUN_FAILED, (
+            "FAIL: unittest collected/ran zero tests; refusing to report "
+            "success."
+        )
+    if exit_code:
+        return RUN_FAILED, f"FAIL: the unittest runner exited with {exit_code}."
+    if counts["failed"]:
+        return RUN_FAILED, (
+            f"FAIL: {counts['failed']} unittest test(s) failed or errored."
+        )
+    if counts["skipped"]:
+        if counts["passed"] == 0:
+            return RUN_INCOMPLETE, (
+                "INCOMPLETE VERIFICATION: every unittest test was skipped "
+                f"({counts['skipped']} skipped, 0 executed); nothing was "
+                "verified, so this run is not a pass (exit 3)."
+            )
+        return RUN_INCOMPLETE, (
+            f"INCOMPLETE VERIFICATION: {counts['skipped']} unittest test(s) "
+            f"were skipped ({counts['passed']} passed); a skipped suite is an "
+            "unverified suite, so this run cannot claim complete "
+            "verification (exit 3)."
+        )
+    if counts["passed"] == 0:
+        return RUN_FAILED, (
+            "FAIL: unittest reported no executed tests; refusing to report "
+            "success."
+        )
+    return RUN_PASS, f"unittest: {counts['passed']} passed, 0 skipped, 0 failed."
+
+
+def runner_exit_status(statuses):
+    """Map per-runner verdicts to the process exit status.
+
+    0 — every runner fully passed (zero skips, zero failures).
+    1 — at least one runner failed (or collected nothing).
+    3 — INCOMPLETE VERIFICATION: no failures, but at least one runner had
+        skipped tests. The distinct code keeps a padded run from being
+        mistaken for a pass (0) or a failure (1).
+    """
+    if RUN_FAILED in statuses:
+        return 1
+    if RUN_INCOMPLETE in statuses:
+        return 3
+    return 0
 
 
 def container_run_command(image_tag: str, mounts: list[str], inner: str) -> list[str]:
@@ -191,25 +424,12 @@ def main() -> int:
                 inner=pytest_inner,
             )
         )
-        if pytest_rc == PYTEST_NO_TESTS_COLLECTED_EXIT:
-            print(
-                "FAIL: pytest collected zero tests (exit code 5); refusing to "
-                "report success.",
-                flush=True,
-            )
-            failures += 1
-        elif pytest_rc:
-            print(f"FAIL: the pytest runner exited with {pytest_rc}.", flush=True)
-            failures += 1
-        else:
-            collected = re.search(r"collected (\d+) item", pytest_output)
-            if not collected or int(collected.group(1)) == 0:
-                print(
-                    "FAIL: pytest reported zero collected items despite exit "
-                    "code 0; refusing to report success.",
-                    flush=True,
-                )
-                failures += 1
+        pytest_counts = parse_test_counts(pytest_output, "pytest")
+        pytest_collected = re.search(r"collected (\d+) item", pytest_output)
+        pytest_status, pytest_message = classify_pytest(
+            pytest_counts, pytest_rc, pytest_collected
+        )
+        print(pytest_message, flush=True)
 
         # ---- Runner 2: unittest-style suites ----------------------------------
         unittest_inner = " ".join(
@@ -218,22 +438,43 @@ def main() -> int:
         unittest_rc, unittest_output = run_capture(
             container_run_command(image_tag, mounts=[tests_mount], inner=unittest_inner)
         )
-        ran = re.search(r"Ran (\d+) tests?", unittest_output)
-        if not ran or int(ran.group(1)) == 0:
+        unittest_counts = parse_test_counts(unittest_output, "unittest")
+        unittest_ran = re.search(r"Ran (\d+) tests?", unittest_output)
+        unittest_status, unittest_message = classify_unittest(
+            unittest_counts, unittest_rc, unittest_ran
+        )
+        print(unittest_message, flush=True)
+
+        # Per-runner summary: a fully passed run is distinguishable from one
+        # padded with skips, and skips are never folded into the pass count.
+        print("Isolated ABAC suite summary:", flush=True)
+        for label, counts in (
+            ("pytest", pytest_counts),
+            ("unittest", unittest_counts),
+        ):
             print(
-                "FAIL: unittest collected/ran zero tests; refusing to report "
-                "success.",
+                f"  {label:<9} {counts['passed']} passed, "
+                f"{counts['skipped']} skipped, {counts['failed']} failed",
                 flush=True,
             )
-            failures += 1
-        elif unittest_rc:
-            print(f"FAIL: the unittest runner exited with {unittest_rc}.", flush=True)
-            failures += 1
 
-        if failures:
-            return 1
-        print("All isolated ABAC suites passed.", flush=True)
-        return 0
+        exit_status = runner_exit_status([pytest_status, unittest_status])
+        if exit_status == 0:
+            print("All isolated ABAC suites passed.", flush=True)
+        elif exit_status == 3:
+            print(
+                "INCOMPLETE VERIFICATION: the suites executed but skipped "
+                "tests mean complete verification was not achieved (exit 3 — "
+                "distinct from a pass (0) and a failure (1)).",
+                flush=True,
+            )
+        else:
+            print(
+                "FAILED: at least one runner failed or collected no tests "
+                "(exit 1).",
+                flush=True,
+            )
+        return exit_status
     except FileNotFoundError as exc:
         print(f"Required executable not found: {exc.filename}", file=sys.stderr)
         return 127

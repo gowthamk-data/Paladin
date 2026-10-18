@@ -59,7 +59,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
+
+# The isolated-ABAC test harness (scripts/) lives next to the tests in their own
+# directory; it is not part of the gateway app but must be importable inside the
+# disposable test container.
+COPY scripts/ ./scripts/
+
 COPY gateway/ ./gateway/
+
 # data/ is kept because ingestion (data/ingest.py) is run from inside this container with
 # `docker compose exec -T -e PYTHONPATH=/app paladin-api python data/ingest.py`
 # (PYTHONPATH is required: the image does not put /app on sys.path); it is a few kilobytes.
