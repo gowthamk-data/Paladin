@@ -4,8 +4,8 @@
 **PostgreSQL:** 16  
 **ChromaDB:** 0.4.24 (pinned)  
 **Ollama:** 0.34.2  
-**Status:** Authoritative procedures reconstructed from source code and two isolated rehearsals  
-**Evidence limit:** Procedures below mix three evidence types. Where a procedure was exercised during the isolated rehearsals (`pgvr-ih9ae8`, `20261019-191425-559672`), it is stated explicitly. Where a procedure was verified only by source-code inspection of `data/ingest.py`, `gateway/rag/generations.py`, `gateway/db/models.py`, or `paladin/docker-compose.yml`, it is marked **source-verified**. Where behavior has neither been exercised nor source-verified, it is marked **unverified**. **No backup, restore, rollback, ingestion, or deployment validation has ever been performed against the live Paladin stack.**
+**Status:** Procedures reconstructed from source code, two isolated rehearsals, and the Gate 1 live-source-to-disposable-restore rehearsal (2026-11-09)
+**Evidence limit:** Procedures below mix source inspection and rehearsal evidence. The two earlier isolated rehearsals (`pgvr-ih9ae8`, `20261019-191425-559672`) and the 2026-11-09 Gate 1 rehearsal are distinguished below. The Gate 1 run backed up the live Paladin database and Chroma volume, then restored copies only into disposable services. It did not restore into or modify live data services. No live rollback, ingestion, generation cutover, or deployment validation has been performed.
 
 ---
 
@@ -17,10 +17,11 @@ Recovery procedures were exercised across two isolated rehearsals against dispos
 
 - **Rehearsal `pgvr-ih9ae8`**: Verified single-generation ingestion, pointer activation, PostgreSQL backup/restore (`pg_dump`/`pg_restore`), Chroma backup/restore via `tar` volume copy, rollback refusal due to no previous generation existing, and cleanup.
 - **Rehearsal `20261019-191425-559672`**: Verified two-generation ingestion/cutover, active-pointer resolution, successful Gen-2 → Gen-1 rollback, hash-failure refusal, and cleanup.
+- **Gate 1 rehearsal (2026-11-09)**: Backed up only the live Paladin PostgreSQL database and Chroma volume, restored both copies into disposable services, and verified the restored data plus the 16-case ABAC policy/retrieval-filter matrix. The Chroma service was briefly stopped for a consistent volume copy and restarted healthy. Temporary archives and scratch resources were removed. See [`GATE1_RESULTS_2026-11-09.md`](GATE1_RESULTS_2026-11-09.md) for counts, hashes, and limits.
 
-These results were obtained from disposable, isolated rehearsal stacks. No deleted temporary rehearsal reports or workspaces were independently re-opened or re-verified.
+The Gate 1 rehearsal used live data as the backup source but performed restores and access checks only against isolated disposable copies. It did not exercise the full HTTP `/ask` route, LLM generation, generation-pointer resolution, generation-aware ingestion, live rollback, or restoration into the live services.
 
-**No backup, restore, rollback, ingestion, or deployment validation has ever been performed against the live Paladin stack.**
+**A live-source backup has now been created and verified by restoring disposable copies. No restore, rollback, ingestion, generation cutover, or deployment validation has been performed against the live Paladin stack.**
 
 Before running any procedure against live infrastructure, obtain explicit change-management approval and verify that the target environment matches the code version described here.
 
@@ -30,7 +31,8 @@ The seed script (`gateway/db/seed.py`) creates four demo user accounts with hard
 
 ### 0.3 What This Runbook Does Not Cover
 
-- Live-production backup or restore (never performed)
+- Restoration into live services or full live recovery (never performed)
+- Off-host backup retention or forensic sanitization of deleted backup media
 - Cross-environment migration of generation state
 - ChromaDB versions other than 0.4.24
 - PostgreSQL versions other than 16
