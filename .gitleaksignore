@@ -1,0 +1,3 @@
+# Gitleaks ignore list for false positives
+# Allowlist candidate Docker image tag references (paladin-paladin-api:<tag>)
+paladin-paladin-api:*

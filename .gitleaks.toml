@@ -1,0 +1,11 @@
+# Gitleaks configuration for Project Paladin
+title = "Paladin Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist Docker candidate image tags (e.g., paladin-paladin-api:<tag>)"
+regexes = [
+    '''paladin-paladin-api:[A-Za-z0-9_.-]+''',
+]
