@@ -72,7 +72,9 @@ from the working API and UI images. Docker builds install the top-level requirem
 those constraints so transitive dependencies cannot silently drift. In particular, the UI lock
 keeps PyArrow at 25.0.1 alongside NumPy 1.26.4; PyArrow 26 requires NumPy 2 at runtime, while the
 working Streamlit environment uses NumPy 1.26.4. The UI requirements file does not need a
-separate direct NumPy requirement: the lock pins its resolved runtime version.
+separate direct NumPy requirement: the lock pins its resolved runtime version. Its Docker build
+pins the build-only `wheel` tool to 0.45.1 because the base image's newer wheel requires
+`packaging>=24`, which conflicts with Streamlit 1.31's `packaging<24` requirement.
 
 ## Why the live harnesses are not collected by pytest
 
