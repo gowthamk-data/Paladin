@@ -1,5 +1,5 @@
-# Root-level ignores: IDE/session state only. Project rules live in paladin/.gitignore
-# (which covers paladin/.env, paladin/keys/, caches, venvs, and logs).
+# Root-level ignores cover local tooling and Paladin deployment/rehearsal files.
+# Project-specific secret, cache, venv, and log rules live in paladin/.gitignore.
 .kilo/
 
 # Local Paladin deployment and rehearsal configuration. Keep the rollback
