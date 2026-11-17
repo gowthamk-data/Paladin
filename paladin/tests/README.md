@@ -31,6 +31,49 @@ zero-collected-tests result is reported as a failure rather than a pass. This ru
 The ABAC secondary-denial test deliberately injects a result that violates the normal Chroma
 filter. It verifies the defense-in-depth denial branch, not a normal-path ABAC denial.
 
+## PostgreSQL-backed tests
+
+Two integration paths require throwaway PostgreSQL services and are intentionally skipped when
+their explicit connection settings are absent:
+
+* `test_generation_pointer.py::test_acquire_serializes_concurrent_setup_across_processes` uses
+  `PALADIN_PG_CONCURRENCY_URL` for a disposable PostgreSQL database. It tests real cross-process
+  advisory-lock behavior; SQLite and fakes are not substitutes.
+* `test_ask_legacy_pointer_fallback_pg.py` uses `PALADIN_PG_FALLBACK_URL` and
+  `PALADIN_CHROMA_FALLBACK_HOST`. Its PostgreSQL URL must target the throwaway service
+  `gate2-fallback-pg` and database `paladin_test`; `PALADIN_CHROMA_FALLBACK_HOST` must be
+  `gate2-fallback-chroma`. The route, pointer resolution, and audit persistence use real
+  PostgreSQL; Chroma retrieval and Ollama generation are mocked by the test.
+
+The isolated runner also accepts `PALADIN_ISOLATED_TEST_NETWORK` to run these tests. It requires
+an existing Docker **internal** network named `paladin-abac-scratch-<id>` containing only the
+two disposable services. The service/container names must satisfy the runner's guard:
+`gate2-fallback-pg` with container name `paladin-abac-pg-<id>`, and `gate2-fallback-chroma`
+with container name `paladin-abac-chroma-<id>`. Do not publish ports or attach live volumes.
+Set all three URL/host variables in the shell that invokes the runner; the runner passes them
+only to its isolated test containers. For example, using an alphanumeric throwaway password:
+
+```powershell
+$env:PALADIN_ISOLATED_TEST_NETWORK = 'paladin-abac-scratch-demo1'
+$env:PALADIN_PG_CONCURRENCY_URL = 'postgresql+psycopg2://postgres:throwaway-only@gate2-fallback-pg:5432/paladin_test'
+$env:PALADIN_PG_FALLBACK_URL = $env:PALADIN_PG_CONCURRENCY_URL
+$env:PALADIN_CHROMA_FALLBACK_HOST = 'gate2-fallback-chroma'
+python scripts/run_isolated_abac_tests.py
+```
+
+Create the named internal network and both private services before the command, then remove the
+scratch services, their volumes, and the network afterward. The concurrency test creates and
+drops a uniquely named schema in the supplied throwaway database. Never point these variables
+at a live or shared database. Without the scratch environment, these PostgreSQL-only cases
+remain skipped and the runner correctly reports incomplete verification.
+
+`gateway/requirements.lock` and `ui/requirements.lock` are complete pinned constraints captured
+from the working API and UI images. Docker builds install the top-level requirements against
+those constraints so transitive dependencies cannot silently drift. In particular, the UI lock
+keeps PyArrow at 25.0.1 alongside NumPy 1.26.4; PyArrow 26 requires NumPy 2 at runtime, while the
+working Streamlit environment uses NumPy 1.26.4. The UI requirements file does not need a
+separate direct NumPy requirement: the lock pins its resolved runtime version.
+
 ## Why the live harnesses are not collected by pytest
 
 `conftest.py` lists them in `collect_ignore`. They are script-style suites that talk to a running
