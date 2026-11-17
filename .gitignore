@@ -1,3 +1,11 @@
 # Root-level ignores: IDE/session state only. Project rules live in paladin/.gitignore
 # (which covers paladin/.env, paladin/keys/, caches, venvs, and logs).
 .kilo/
+
+# Local Paladin deployment and rehearsal configuration. Keep the rollback
+# override locally available, but never stage these environment-specific files.
+/docker-compose.rehearsal.yml
+/paladin/docker-compose.gate2a.yml
+/paladin/docker-compose.gate2a-rollback.yml
+/paladin/docs/recovery/GATE2B_LIVE_RUNBOOK_DRAFT.md
+/paladin/docs/recovery/GATE2_ROLLOUT_PLAN.md
