@@ -1,0 +1,4 @@
+* text=auto
+*.sh text eol=lf
+paladin/data/documents/* text eol=lf
+paladin/data/manifest.json text eol=lf
