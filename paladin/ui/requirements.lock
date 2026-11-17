@@ -1,7 +1,6 @@
 # Runtime constraints captured from paladin-paladin-ui:latest (image 079151f4e3d6).
 # In particular, pyarrow 25.0.1 is compatible with the image's NumPy 1.26.4;
-# PyArrow 26 requires NumPy 2 and is intentionally excluded. Packaging is
-# pinned to the build-tool-compatible version because the Dockerfile upgrades wheel.
+# PyArrow 26 requires NumPy 2 and is intentionally excluded.
 altair==5.5.0
 attrs==26.1.0
 blinker==1.9.0
@@ -21,7 +20,7 @@ MarkupSafe==3.0.3
 mdurl==0.1.2
 narwhals==2.26.0
 numpy==1.26.4
-packaging==26.3
+packaging==23.2
 pandas==2.3.3
 pillow==10.4.0
 protobuf==4.25.9
