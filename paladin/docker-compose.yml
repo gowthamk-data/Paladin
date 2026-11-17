@@ -71,6 +71,25 @@ services:
           cpus: "0.25"
           memory: 512M
 
+  # Run explicitly for user provisioning. Keeping seeding credentials out of
+  # the long-lived API container limits their lifetime to this one-off task.
+  paladin-seeder:
+    image: paladin-paladin-api:latest
+    profiles: ["operations"]
+    entrypoint: ["python", "-m", "gateway.db.seed"]
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/paladin
+      - PALADIN_ENV=${PALADIN_ENV:-}
+      - PALADIN_SEED_EMP1_PASSWORD=${PALADIN_SEED_EMP1_PASSWORD:-}
+      - PALADIN_SEED_EMP1_PASSWORD_FILE=${PALADIN_SEED_EMP1_PASSWORD_FILE:-}
+      - PALADIN_SEED_MGR1_PASSWORD=${PALADIN_SEED_MGR1_PASSWORD:-}
+      - PALADIN_SEED_MGR1_PASSWORD_FILE=${PALADIN_SEED_MGR1_PASSWORD_FILE:-}
+      - PALADIN_SEED_ADMIN1_PASSWORD=${PALADIN_SEED_ADMIN1_PASSWORD:-}
+      - PALADIN_SEED_ADMIN1_PASSWORD_FILE=${PALADIN_SEED_ADMIN1_PASSWORD_FILE:-}
+      - PALADIN_SEED_FIN1_PASSWORD=${PALADIN_SEED_FIN1_PASSWORD:-}
+      - PALADIN_SEED_FIN1_PASSWORD_FILE=${PALADIN_SEED_FIN1_PASSWORD_FILE:-}
+    networks: [internal]
+
   paladin-ui:
     build:
       context: .

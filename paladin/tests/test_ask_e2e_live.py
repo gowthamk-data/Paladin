@@ -1,5 +1,6 @@
 import requests
 import json
+from live_credentials import password_for
 
 API_URL = "http://localhost:8000"
 
@@ -7,7 +8,7 @@ API_URL = "http://localhost:8000"
 print("=== Step 1: Authenticate as emp1 ===")
 resp = requests.post(
     f"{API_URL}/auth/login",
-    params={"username": "emp1", "password": "emp1_pass"},
+    params={"username": "emp1", "password": password_for("emp1")},
 )
 print(f"Status: {resp.status_code}")
 data = resp.json()

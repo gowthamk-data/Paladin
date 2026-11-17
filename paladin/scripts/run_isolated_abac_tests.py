@@ -50,12 +50,14 @@ Parser contract (Task 2 -- fail closed):
 from __future__ import annotations
 
 import re
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +71,7 @@ PYTEST_MODULES = (
     "tests/test_generation_cutover.py",
     "tests/test_seed_users.py",
     "tests/test_runner_reporting.py",
+    "tests/test_live_credentials.py",
 )
 # unittest-style suites: TestCase classes with skipUnless guards.
 UNITTEST_MODULES = (
@@ -85,6 +88,11 @@ ENV = {
     "JWT_PRIVATE_KEY_PATH": "/dev/null",
     "JWT_PUBLIC_KEY_PATH": "/dev/null",
 }
+SCRATCH_TEST_ENV = (
+    "PALADIN_PG_CONCURRENCY_URL",
+    "PALADIN_PG_FALLBACK_URL",
+    "PALADIN_CHROMA_FALLBACK_HOST",
+)
 
 PYTEST_NO_TESTS_COLLECTED_EXIT = 5
 # ---------------------------------------------------------------------------
@@ -356,14 +364,20 @@ def runner_exit_status(statuses):
     return 0
 
 
-def container_run_command(image_tag: str, mounts: list[str], inner: str) -> list[str]:
+def container_run_command(
+    image_tag: str,
+    mounts: list[str],
+    inner: str,
+    network: str | None = None,
+    passthrough_env: tuple[str, ...] = (),
+) -> list[str]:
     """Assemble a docker run for the disposable, fully isolated test container."""
+    network_args = ["--network", network] if network else ["--network", "none"]
     command = [
         "docker",
         "run",
         "--rm",
-        "--network",
-        "none",
+        *network_args,
         "--read-only",
         # The only writable paths: pytest's tmp_path fixture and the runtime
         # --target install of pytest from the mounted wheelhouse.
@@ -375,27 +389,124 @@ def container_run_command(image_tag: str, mounts: list[str], inner: str) -> list
         command += ["--mount", mount]
     for key, value in ENV.items():
         command += ["--env", f"{key}={value}"]
+    if network:
+        command += [
+            "--env", "CHROMADB_HOST=gate2-fallback-chroma",
+            "--env", "CHROMADB_PORT=8000",
+        ]
+    # Bare --env KEY copies that value from this host process without putting
+    # the credential-bearing PostgreSQL URL in the printed Docker command.
+    for key in passthrough_env:
+        command += ["--env", key]
     command += ["--env", "PYTHONPATH=/app", image_tag, "sh", "-c", inner]
     return command
 
 
+def scratch_test_configuration() -> tuple[str | None, tuple[str, ...]]:
+    """Validate the optional internal-only scratch network and its endpoints.
+
+    The default runner remains network-disabled. Scratch mode accepts only an
+    internal network with the expected disposable PostgreSQL and Chroma
+    containers attached; service credentials are passed by variable name so
+    they are not printed in runner output.
+    """
+    network = os.environ.get("PALADIN_ISOLATED_TEST_NETWORK")
+    if not network:
+        return None, ()
+    if not re.fullmatch(r"paladin-abac-scratch-[a-z0-9-]+", network):
+        raise ValueError("scratch network name must use paladin-abac-scratch-<id>")
+
+    inspect = subprocess.run(
+        ["docker", "network", "inspect", "--format", "{{.Internal}}", network],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if inspect.returncode or inspect.stdout.strip().lower() != "true":
+        raise ValueError("scratch test network must exist and be Docker-internal")
+
+    attached = subprocess.run(
+        [
+            "docker", "network", "inspect", "--format",
+            "{{range .Containers}}{{.Name}} {{end}}", network,
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    names = attached.stdout.split()
+    has_pg = any(name.startswith("paladin-abac-pg-") for name in names)
+    has_chroma = any(name.startswith("paladin-abac-chroma-") for name in names)
+    only_scratch = all(
+        name.startswith(("paladin-abac-pg-", "paladin-abac-chroma-"))
+        for name in names
+    )
+    if attached.returncode or not (has_pg and has_chroma and only_scratch):
+        raise ValueError(
+            "scratch network must contain only the disposable paladin-abac PostgreSQL and Chroma services"
+        )
+
+    required = (
+        "PALADIN_PG_CONCURRENCY_URL",
+        "PALADIN_PG_FALLBACK_URL",
+        "PALADIN_CHROMA_FALLBACK_HOST",
+    )
+    for variable in required:
+        if not os.environ.get(variable):
+            raise ValueError(f"scratch mode requires {variable}")
+    for variable in required[:2]:
+        parsed = urlparse(os.environ[variable])
+        if parsed.hostname != "gate2-fallback-pg" or parsed.path != "/paladin_test":
+            raise ValueError(
+                f"{variable} must target the disposable gate2-fallback-pg/paladin_test service"
+            )
+    if os.environ["PALADIN_CHROMA_FALLBACK_HOST"] != "gate2-fallback-chroma":
+        raise ValueError(
+            "PALADIN_CHROMA_FALLBACK_HOST must target the disposable gate2-fallback-chroma service"
+        )
+    return network, required
+
+
 def main() -> int:
     image_tag = f"paladin-api-abac-test:{uuid.uuid4().hex[:12]}"
-    wheelhouse = Path(tempfile.mkdtemp(prefix="paladin-pytest-wheels-"))
+    wheelhouse: Path | None = None
+    pytest_source: Path | None = None
     build_attempted = False
     try:
-        print(f"Downloading pytest wheels on the host into {wheelhouse}", flush=True)
-        if not download_pytest_wheels(wheelhouse):
-            print(
-                "ERROR: the host-side pytest wheel download failed. Running the "
-                "pytest-style suites would require adding pytest to the "
-                "production image or enabling networking inside the test "
-                "container; both are forbidden by the isolation constraints, "
-                "so aborting instead of relaxing them.",
-                file=sys.stderr,
-                flush=True,
-            )
-            return 2
+        network, passthrough_env = scratch_test_configuration()
+        configured_source = os.environ.get("PALADIN_ISOLATED_PYTEST_SOURCE")
+        if configured_source:
+            pytest_source = Path(configured_source).resolve()
+            if not (pytest_source / "pytest" / "__init__.py").is_file() or not (
+                pytest_source / "_pytest" / "__init__.py"
+            ).is_file():
+                print(
+                    "ERROR: PALADIN_ISOLATED_PYTEST_SOURCE must contain the pure-Python pytest and _pytest packages.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 2
+            print("Using the mounted pure-Python pytest source for offline tests.", flush=True)
+        else:
+            wheelhouse = Path(tempfile.mkdtemp(prefix="paladin-pytest-wheels-"))
+            print(f"Downloading pytest wheels on the host into {wheelhouse}", flush=True)
+            if not download_pytest_wheels(wheelhouse):
+                print(
+                    "ERROR: the host-side pytest wheel download failed. Running the "
+                    "pytest-style suites would require adding pytest to the "
+                    "production image or enabling networking inside the test "
+                    "container; both are forbidden by the isolation constraints, "
+                    "so aborting instead of relaxing them.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 2
 
         build_attempted = True
         build_status = run(
@@ -408,21 +519,31 @@ def main() -> int:
         tests_mount = f"type=bind,source={TESTS_DIR.resolve()},target=/app/tests,readonly"
 
         # ---- Runner 1: pytest-style suites ------------------------------------
-        pytest_inner = (
-            "/opt/venv/bin/python -m pip install --no-index --no-cache-dir "
-            "--no-compile --find-links /mnt/wheels --target /tmp/pylibs -q pytest"
-            " && PYTHONPATH=/app:/tmp/pylibs /opt/venv/bin/python -m pytest "
-            + " ".join(PYTEST_MODULES)
-            + " -v -p no:cacheprovider"
-        )
+        if wheelhouse is not None:
+            pytest_inner = (
+                "/opt/venv/bin/python -m pip install --no-index --no-cache-dir "
+                "--no-compile --find-links /mnt/wheels --target /tmp/pylibs -q pytest"
+                " && PYTHONPATH=/app:/tmp/pylibs /opt/venv/bin/python -m pytest "
+                + " ".join(PYTEST_MODULES)
+                + " -v -p no:cacheprovider"
+            )
+            pytest_mount = f"type=bind,source={wheelhouse},target=/mnt/wheels,readonly"
+        else:
+            pytest_inner = (
+                "PYTHONPATH=/app:/mnt/pytest-source /opt/venv/bin/python -m pytest "
+                + " ".join(PYTEST_MODULES)
+                + " -v -p no:cacheprovider"
+            )
+            pytest_mount = (
+                f"type=bind,source={pytest_source},target=/mnt/pytest-source,readonly"
+            )
         pytest_rc, pytest_output = run_capture(
             container_run_command(
                 image_tag,
-                mounts=[
-                    tests_mount,
-                    f"type=bind,source={wheelhouse},target=/mnt/wheels,readonly",
-                ],
+                mounts=[tests_mount, pytest_mount],
                 inner=pytest_inner,
+                network=network,
+                passthrough_env=passthrough_env,
             )
         )
         pytest_counts = parse_test_counts(pytest_output, "pytest")
@@ -437,7 +558,13 @@ def main() -> int:
             ["/opt/venv/bin/python", "-m", "unittest", *UNITTEST_MODULES, "-v"]
         )
         unittest_rc, unittest_output = run_capture(
-            container_run_command(image_tag, mounts=[tests_mount], inner=unittest_inner)
+            container_run_command(
+                image_tag,
+                mounts=[tests_mount],
+                inner=unittest_inner,
+                network=network,
+                passthrough_env=passthrough_env,
+            )
         )
         unittest_counts = parse_test_counts(unittest_output, "unittest")
         unittest_ran = re.search(r"Ran (\d+) tests?", unittest_output)
@@ -482,7 +609,8 @@ def main() -> int:
     finally:
         # The unique tag and the wheelhouse are owned by this invocation.
         # Cleanup is best-effort and cannot hide a build or test failure.
-        shutil.rmtree(wheelhouse, ignore_errors=True)
+        if wheelhouse is not None:
+            shutil.rmtree(wheelhouse, ignore_errors=True)
         if build_attempted:
             try:
                 cleanup = subprocess.run(

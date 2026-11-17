@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from live_credentials import password_for
 
 API_URL = os.environ.get("PALADIN_API_URL", "http://localhost:8000")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,10 +42,8 @@ MAX_REQUEST_BYTES = int(os.environ.get("PALADIN_MAX_REQUEST_BYTES", "32000"))
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("PALADIN_RATE_PER_MINUTE", "10"))
 
 USERS = {
-    "emp1": ("emp1", "emp1_pass"),
-    "mgr1": ("mgr1", "mgr1_pass"),
-    "admin1": ("admin1", "admin1_pass"),
-    "fin1": ("fin1", "fin1_pass"),
+    username: (username, password_for(username))
+    for username in ("emp1", "mgr1", "admin1", "fin1")
 }
 
 # Values from the live PII matrix. Rotate with tests/test_pii_detection.py if the detector
@@ -71,10 +70,9 @@ LEAK_MARKERS = [
     "postgresql+psycopg2",
     "private key",
     "begin rsa",
-    "emp1_pass",
-    "fin1_pass",
     "change_me_strong_password",
 ]
+LEAK_MARKERS.extend(password for _, password in USERS.values())
 
 RESULTS = []
 

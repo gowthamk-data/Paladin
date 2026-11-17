@@ -2,7 +2,9 @@ import sys
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 from jose import jwt
+from live_credentials import password_for
 
 BASE_URL = "http://localhost:8000"
 
@@ -30,8 +32,9 @@ def check(name, condition, detail=""):
 print("Test 1: emp1 login...")
 emp1_token = None
 try:
+    login_params = urllib.parse.urlencode({"username": "emp1", "password": password_for("emp1")})
     req = urllib.request.Request(
-        f"{BASE_URL}/auth/login?username=emp1&password=emp1_pass", method="POST",
+        f"{BASE_URL}/auth/login?{login_params}", method="POST",
     )
     resp = urllib.request.urlopen(req)
     data = json.loads(resp.read().decode())
@@ -45,8 +48,9 @@ except Exception as e:
 print("Test 2: mgr1 login...")
 mgr1_token = None
 try:
+    login_params = urllib.parse.urlencode({"username": "mgr1", "password": password_for("mgr1")})
     req = urllib.request.Request(
-        f"{BASE_URL}/auth/login?username=mgr1&password=mgr1_pass", method="POST",
+        f"{BASE_URL}/auth/login?{login_params}", method="POST",
     )
     resp = urllib.request.urlopen(req)
     data = json.loads(resp.read().decode())
@@ -59,8 +63,9 @@ except Exception as e:
 print("Test 3: admin1 login...")
 admin1_token = None
 try:
+    login_params = urllib.parse.urlencode({"username": "admin1", "password": password_for("admin1")})
     req = urllib.request.Request(
-        f"{BASE_URL}/auth/login?username=admin1&password=admin1_pass", method="POST",
+        f"{BASE_URL}/auth/login?{login_params}", method="POST",
     )
     resp = urllib.request.urlopen(req)
     data = json.loads(resp.read().decode())

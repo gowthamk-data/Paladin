@@ -1,6 +1,7 @@
 import requests
 import time
 import os
+from live_credentials import password_for
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 BURST_LIMIT = int(os.environ.get("RATE_LIMIT_BURST", 20))
@@ -10,7 +11,7 @@ SUSTAINED_LIMIT = int(os.environ.get("RATE_LIMIT_PER_MINUTE", 10))
 print("=== Step 0: Authenticate as emp1 ===")
 resp = requests.post(
     f"{API_URL}/auth/login",
-    params={"username": "emp1", "password": "emp1_pass"},
+    params={"username": "emp1", "password": password_for("emp1")},
 )
 if resp.status_code != 200:
     print(f"Login failed: {resp.status_code} {resp.text}")

@@ -4,6 +4,7 @@
 # paladin/scripts/generate_rsa_keys.sh and `cp paladin/.env.example paladin/.env`.
 .env
 keys/
+secrets/
 
 # --- Python ----------------------------------------------------------------------------------
 __pycache__/

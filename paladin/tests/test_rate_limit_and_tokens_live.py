@@ -30,6 +30,7 @@ import threading
 import time
 
 import requests
+from live_credentials import password_for
 
 API_URL = os.environ.get("PALADIN_API_URL", "http://localhost:8000")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,9 +41,8 @@ BURST = int(os.environ.get("PALADIN_BURST", "20"))
 PER_MINUTE = int(os.environ.get("PALADIN_RATE_PER_MINUTE", "10"))
 
 USERS = {
-    "emp1": ("emp1", "emp1_pass"),
-    "mgr1": ("mgr1", "mgr1_pass"),
-    "admin1": ("admin1", "admin1_pass"),
+    username: (username, password_for(username))
+    for username in ("emp1", "mgr1", "admin1")
 }
 
 # Short-answer prompt: keeps a *real* LLM round-trip inside the 60s window on CPU-only Ollama.
@@ -455,7 +455,7 @@ def part4_login_rate_limit():
            codes[:10] == [401] * 10 and codes[10] == 429, f"codes={codes}")
 
     resp = requests.post(f"{API_URL}/auth/login",
-                         params={"username": "admin1", "password": "admin1_pass"}, timeout=30)
+                         params={"username": "admin1", "password": password_for("admin1")}, timeout=30)
     record("valid login also rejected while the IP bucket is exhausted",
            resp.status_code == 429, f"got {resp.status_code}")
 
@@ -471,7 +471,7 @@ def part4_login_rate_limit():
     print(f"  ... waiting {remaining}s for the login window to reset", flush=True)
     time.sleep(remaining)
     resp = requests.post(f"{API_URL}/auth/login",
-                         params={"username": "admin1", "password": "admin1_pass"}, timeout=30)
+                         params={"username": "admin1", "password": password_for("admin1")}, timeout=30)
     record("login succeeds again after the window resets", resp.status_code == 200,
            f"got {resp.status_code}")
 

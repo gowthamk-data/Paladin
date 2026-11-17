@@ -39,7 +39,7 @@ docker compose up -d --build
 # first run only: pull the model and build the retrieval index
 ./scripts/setup_ollama.sh # pulls "$OLLAMA_MODEL" inside the ollama container
 docker compose exec -T -e PYTHONPATH=/app paladin-api python data/ingest.py
-docker compose exec -T paladin-api python -m gateway.db.seed
+docker compose run --rm --no-deps paladin-seeder --local-dev
 ```
 
 Prerequisites: Docker Engine + the Compose plugin, `bash` and `openssl` (for the
@@ -54,14 +54,36 @@ model, cached in its named volume after the first run).
 `docker compose up` fails immediately if `POSTGRES_PASSWORD` is unset - it will not start
 PostgreSQL with an empty password.
 
-### Demo users
+### Local-development demo users
 
-| username | password | department | clearance | role |
+The table below documents credentials available only when the seeder is run
+with the explicit `--local-dev` flag against a throwaway local database. Never
+use these passwords on a hosted or public instance.
+
+| username | local-dev password | department | clearance | role |
 | --- | --- | --- | --- | --- |
 | `emp1` | `emp1_pass` | Engineering | 1 | employee |
 | `mgr1` | `mgr1_pass` | Engineering | 2 | manager |
 | `admin1` | `admin1_pass` | Executive | 3 | admin |
 | `fin1` | `fin1_pass` | Finance | 2 | employee |
+
+For hosted or other non-local seeding, configure a distinct secret for each
+user with `PALADIN_SEED_EMP1_PASSWORD`, `PALADIN_SEED_MGR1_PASSWORD`,
+`PALADIN_SEED_ADMIN1_PASSWORD`, and `PALADIN_SEED_FIN1_PASSWORD`, or use the
+corresponding `_FILE` variable for a secret file mounted read-only inside the
+one-off seeder container. Each value must be distinct and 12–72 UTF-8 bytes;
+`admin1` has its own required secret. Set `PALADIN_ENV=production` on
+production hosts and run `docker compose run --rm --no-deps paladin-seeder`
+without `--local-dev`. The production marker rejects `--local-dev`. Without
+configured secrets, the seeder refuses to run. It creates missing users only;
+existing passwords and account attributes are never changed. Password rotation
+is a separate operation.
+
+Live verification scripts do not fall back to the published local demo
+passwords. Set `PALADIN_TEST_EMP1_PASSWORD`, `PALADIN_TEST_MGR1_PASSWORD`,
+`PALADIN_TEST_ADMIN1_PASSWORD`, and/or `PALADIN_TEST_FIN1_PASSWORD` in the
+test process environment for the accounts exercised by that script. The
+scripts use those values only for login requests and do not print them.
 
 ## API
 
@@ -168,7 +190,7 @@ python -m unittest tests.test_pii_detection -v
 # live suites: require `docker compose up -d --build` plus a pulled model and seeded DB
 ./scripts/setup_ollama.sh # pulls "$OLLAMA_MODEL" inside the ollama container
 docker compose exec -T -e PYTHONPATH=/app paladin-api python data/ingest.py
-docker compose exec paladin-api python -m gateway.db.seed
+docker compose run --rm --no-deps paladin-seeder --local-dev
 
 python tests/test_auth_live.py                  # JWT claims, tampering, expiry, audience
 python tests/test_rate_limit_and_tokens_live.py # burst + sustained limits, per-user isolation
