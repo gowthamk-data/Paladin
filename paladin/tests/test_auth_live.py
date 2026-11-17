@@ -3,16 +3,16 @@ import json
 import urllib.request
 import urllib.error
 import urllib.parse
+from pathlib import Path
 from jose import jwt
 from live_credentials import password_for
 
 BASE_URL = "http://localhost:8000"
+KEYS_DIR = Path(__file__).resolve().parents[1] / "keys"
 
-with open("C:/Users/GOWTHAM/Paladin/paladin/keys/private.pem", "r") as f:
-    PRIVATE_KEY = f.read()
+PRIVATE_KEY = (KEYS_DIR / "private.pem").read_text(encoding="utf-8")
 
-with open("C:/Users/GOWTHAM/Paladin/paladin/keys/public.pem", "r") as f:
-    PUBLIC_KEY = f.read()
+PUBLIC_KEY = (KEYS_DIR / "public.pem").read_text(encoding="utf-8")
 
 passed = 0
 failed = 0
