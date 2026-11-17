@@ -5,7 +5,7 @@
 **ChromaDB:** 0.4.24 (pinned)  
 **Ollama:** 0.34.2  
 **Status:** Procedures reconstructed from source code, two isolated rehearsals, and the Gate 1 live-source-to-disposable-restore rehearsal (2026-11-09)
-**Evidence limit:** Procedures below mix source inspection and rehearsal evidence. The two earlier isolated rehearsals (`pgvr-ih9ae8`, `20261019-191425-559672`) and the 2026-11-09 Gate 1 rehearsal are distinguished below. The Gate 1 run backed up the live Paladin database and Chroma volume, then restored copies only into disposable services. It did not restore into or modify live data services. No live rollback, ingestion, generation cutover, or deployment validation has been performed.
+**Evidence limit:** Procedures below mix source inspection and rehearsal evidence. The two earlier isolated rehearsals (`pgvr-ih9ae8`, `20261019-191425-559672`) and the 2026-11-09 Gate 1 rehearsal are distinguished below. The Gate 1 run backed up the live Paladin database and Chroma volume, then restored copies only into disposable services. On 2026-11-17, Gate 2A deployed the generation-aware candidate API only; its health and 16-case Chroma-filter access matrix were verified. No live ingestion, generation-pointer cutover, rollback, or restore has been performed.
 
 ---
 
@@ -21,13 +21,13 @@ Recovery procedures were exercised across two isolated rehearsals against dispos
 
 The Gate 1 rehearsal used live data as the backup source but performed restores and access checks only against isolated disposable copies. It did not exercise the full HTTP `/ask` route, LLM generation, generation-pointer resolution, generation-aware ingestion, live rollback, or restoration into the live services.
 
-**A live-source backup has now been created and verified by restoring disposable copies. No restore, rollback, ingestion, generation cutover, or deployment validation has been performed against the live Paladin stack.**
+**A live-source backup has been verified by restoring disposable copies. Gate 2A verified an API-only candidate deployment, health response, and 16-case Chroma-filter access matrix. No restore, rollback, ingestion, or generation cutover has been performed against live data.**
 
 Before running any procedure against live infrastructure, obtain explicit change-management approval and verify that the target environment matches the code version described here.
 
 ### 0.2 Demo Credentials
 
-The seed script (`gateway/db/seed.py`) creates four demo user accounts with hardcoded demonstration passwords. **These credentials must not be used for any public or production deployment.** The runbook references user seeding only by username and role; it never records or requires passwords.
+The seed script (`gateway/db/seed.py`) has built-in demonstration passwords that are accepted only with the explicit `--local-dev` option. Outside local development, it requires distinct configured secrets; `PALADIN_ENV=production` rejects `--local-dev`. Never use the local-development credentials on a hosted or public deployment. The runbook references user seeding only by username and role; it never records or requires passwords.
 
 ### 0.3 What This Runbook Does Not Cover
 
@@ -63,8 +63,8 @@ Seeding is a prerequisite before smoke tests because an empty table produces 401
 **Procedure:**
 
 ```bash
-# Run inside the paladin-api service container with PYTHONPATH set
-docker compose exec -T -e PYTHONPATH=/app paladin-api python gateway/db/seed.py
+# Disposable/local-development database only; invokes the dedicated seeder service.
+docker compose run --rm --no-deps paladin-seeder --local-dev
 ```
 
 **Expected output:**
@@ -78,7 +78,7 @@ docker compose exec -T -e PYTHONPATH=/app paladin-api python gateway/db/seed.py
 
 **Notes:**
 - The script is idempotent: re-running skips existing usernames and preserves their password hashes.
-- Do not modify `seed.py` to change demo passwords. The script is checked into the repository with hardcoded demonstration credentials.
+- Outside local development, configure the four distinct seeder secrets documented in `paladin/README.md` and run the seeder without `--local-dev`. Set `PALADIN_ENV=production` on hosted deployments; this marker prevents local-development seeding.
 - **source-verified:** The seeding behavior (idempotent skip of existing usernames) is confirmed in `gateway/db/seed.py`.
 - **unverified:** Whether seeding is required before every smoke test against a fresh live database has not been confirmed against production.
 
