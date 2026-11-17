@@ -3,9 +3,10 @@
 These tests cover the READ side of the cutover design:
 
 * ``read_active_generation`` resolves the one active row, tolerates the
-  pre-versioning bootstrap cases (missing table / empty table -> ``None``,
-  meaning "serve the legacy collection"), and propagates every other
-  database failure so the gateway can fail closed.
+  pre-versioning bootstrap cases (missing table / empty table -> ``None``),
+  without poisoning the caller's transaction,
+  meaning "serve the legacy collection", and propagates every other database
+  failure so the gateway can fail closed.
 * ``VectorStore`` construction resolves the pointer per request on the passed
   DB session (positional-first: the route calls ``VectorStore(db)`` and an
   earlier ``collection_name``-first signature silently swallowed the session),
@@ -36,22 +37,12 @@ from gateway.db.models import Base, GenerationRow
 from gateway.errors import ServiceUnavailableError
 from gateway.rag.generations import (
     GenerationError,
-    _is_missing_table,
     read_active_generation,
 )
 from gateway.rag.vector_store import VectorStore
 
 GEN_1 = "paladin_docs_abac_gen_000001"
 GEN_2 = "paladin_docs_abac_gen_000002"
-
-
-class _PgcodeError(OperationalError):
-    """OperationalError whose wrapped driver error carries a SQLSTATE."""
-
-    def __init__(self, pgcode, message):
-        orig = Exception(message)
-        orig.pgcode = pgcode
-        super().__init__("SELECT", {}, orig)
 
 
 def _session(engine):
@@ -76,45 +67,17 @@ def _insert_pointer(session, name, is_active, activated_at=None):
 
 
 # ---------------------------------------------------------------------------
-# _is_missing_table: the bootstrap-vs-failure classification
-# ---------------------------------------------------------------------------
-
-
-def test_missing_table_messages_are_bootstrap_cases():
-    # PostgreSQL: SQLSTATE 42P01 (undefined_table), whatever the message says.
-    pg = _PgcodeError("42P01", 'relation "vector_generations" does not exist')
-    assert _is_missing_table(pg) is True
-    # SQLite: no pgcode on the driver error; the dialect's own message counts.
-    lite = OperationalError("SELECT", {}, Exception("no such table: vector_generations"))
-    assert _is_missing_table(lite) is True
-
-
-def test_other_database_errors_are_not_missing_table():
-    dead = OperationalError("SELECT", {}, Exception("could not connect to server"))
-    assert _is_missing_table(dead) is False
-
-
-def test_pgcode_rules_not_message_text():
-    # A bare "does not exist" string WITHOUT SQLSTATE 42P01 is not bootstrap
-    # (e.g. a missing Chroma collection surfacing through a shared handler).
-    bare = OperationalError("SELECT", {}, Exception("collection does not exist"))
-    assert _is_missing_table(bare) is False
-    # Conversely a wrong SQLSTATE never counts, even with a matching message.
-    wrong_code = _PgcodeError("28000", 'relation "vector_generations" does not exist')
-    assert _is_missing_table(wrong_code) is False
-
-
-# ---------------------------------------------------------------------------
 # read_active_generation
 # ---------------------------------------------------------------------------
 
 
 def test_missing_pointer_table_resolves_to_none():
-    # No create_all: querying the absent table must mean "no pointer yet",
-    # not an error.
+    # No create_all: catalog inspection must resolve the bootstrap case without
+    # issuing a failing query against the absent table.
     engine = create_engine("sqlite://")
     session = sessionmaker(bind=engine)()
     assert read_active_generation(session) is None
+    assert session.execute(sa.text("SELECT 1")).scalar_one() == 1
 
 
 def test_empty_pointer_table_resolves_to_none():
@@ -172,7 +135,7 @@ def test_one_active_index_ddl_keys_on_the_flag():
 
 def test_non_missing_database_failure_propagates():
     class DeadSession:
-        def query(self, *args, **kwargs):
+        def connection(self):
             raise SQLAlchemyError("connection refused")
 
     with pytest.raises(SQLAlchemyError, match="connection refused"):

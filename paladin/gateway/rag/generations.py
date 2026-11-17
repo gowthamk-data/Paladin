@@ -61,25 +61,6 @@ class GenerationError(RuntimeError):
     """Pointer-store failure: lock held, corrupt state, or no rollback target."""
 
 
-def _is_missing_table(exc: BaseException) -> bool:
-    """True only for the "pointer table does not exist yet" bootstrap case.
-
-    Identification is by driver error code, never by message substring: the
-    wrapped driver error's SQLSTATE must be ``42P01`` (``undefined_table`` on
-    psycopg2/psycopg). Drivers that do not report SQLSTATE (notably SQLite,
-    whose ``sqlite3.OperationalError`` has no ``pgcode``) fall back to the
-    driver's own missing-table message (``no such table``). A bare
-    "does not exist" message without SQLSTATE 42P01 is NOT bootstrap — it is
-    a real failure and must propagate so callers fail closed.
-    """
-    orig = getattr(exc, "orig", None)
-    pgcode = getattr(orig, "pgcode", None)
-    if pgcode is not None:
-        return pgcode == "42P01"
-    text = str(orig if orig is not None else exc).lower()
-    return "no such table" in text
-
-
 def _is_duplicate_column(exc: BaseException) -> bool:
     """True only for the "column already exists" ALTER TABLE failure.
 
@@ -117,6 +98,16 @@ def read_active_generation(db: Session | None = None) -> str | None:
         db = SessionLocal()
         close = True
     try:
+        # Do not discover the bootstrap case by querying a missing table. On
+        # PostgreSQL, undefined_table aborts the current transaction; catching
+        # that exception and returning None would leave the request's shared
+        # Session unusable for its later request_logs commit. Catalog
+        # inspection is read-only and returns False without poisoning the
+        # transaction, allowing the pre-versioning legacy fallback.
+        connection = db.connection()
+        if not sa.inspect(connection).has_table(GenerationRow.__tablename__):
+            return None
+
         active_rows = (
             db.query(GenerationRow)
             .filter(GenerationRow.is_active.is_(True))
@@ -142,10 +133,6 @@ def read_active_generation(db: Session | None = None) -> str | None:
                 "pointer state corrupt: rows exist but none is active"
             )
         return None
-    except SQLAlchemyError as exc:
-        if _is_missing_table(exc):
-            return None
-        raise
     finally:
         if close:
             db.close()
@@ -305,7 +292,7 @@ class GenerationStore:
         would read a column that does not exist. Every model column is added
         if absent; "already exists" is identified by driver error code
         (PostgreSQL SQLSTATE 42701, SQLite's own duplicate-column message),
-        exactly like ``_is_missing_table`` — never by a bare message match on
+        using driver error codes rather than a bare message match on
         PostgreSQL. Each ALTER runs in its own transaction so a swallowed
         duplicate cannot poison the next one, and any other failure (missing
         table, permissions) propagates so a broken schema fails closed.

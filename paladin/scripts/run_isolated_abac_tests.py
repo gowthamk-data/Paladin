@@ -74,6 +74,7 @@ PYTEST_MODULES = (
 UNITTEST_MODULES = (
     "tests.test_abac_secondary_denial",
     "tests.test_ask_http_503_live",
+    "tests.test_ask_legacy_pointer_fallback_pg",
 )
 
 # The suites override authentication and never sign or decode tokens.

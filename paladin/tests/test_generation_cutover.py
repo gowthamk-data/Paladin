@@ -512,6 +512,23 @@ def test_rollback_restores_previous_generation(tmp_path):
     assert GEN_1 in client.collections and GEN_2 in client.collections
 
 
+def test_second_rollback_toggles_back_to_generation_two(tmp_path):
+    """Rollback is a pointer toggle; callers must never blindly repeat it."""
+    client, store = _fresh(tmp_path)
+    _make_ingestor(tmp_path, client, store).ingest_directory()
+    _tick()
+    _make_ingestor(tmp_path, client, store).ingest_directory()
+
+    store.acquire()
+    try:
+        assert store.rollback() == GEN_1
+        assert store.active_name() == GEN_1
+        assert store.rollback() == GEN_2
+        assert store.active_name() == GEN_2
+    finally:
+        store.release()
+
+
 def _seed_legacy_collection(client):
     """Give the fake Chroma a legacy collection, as a real deployment has."""
     collection = FakeChromaCollection()
@@ -686,6 +703,63 @@ def test_cleanup_deletes_orphans_but_keeps_retention_set(tmp_path):
     assert GEN_3 not in client.collections
     # Retention set survives.
     assert set(client.collections) == {GEN_1, GEN_2}
+
+
+def test_first_ingestion_cleanup_preserves_base_collections_and_unregistered_generation(
+    tmp_path,
+):
+    """First-ingest retention must not select the three existing collections.
+
+    The fake Chroma inventory also includes an unregistered generation-named
+    collection. cleanup_generations() selects from pointer-table rows rather
+    than enumerating Chroma, so a collection with no GenerationRow is not a
+    cleanup candidate.
+    """
+    client, store = _fresh(tmp_path)
+    protected_names = {
+        "paladin_docs",
+        LEGACY,
+        "paladin_docs_abac_staging",
+    }
+    for name in protected_names | {GEN_1, GEN_2}:
+        client.create_collection(name=name)
+
+    delete_calls = []
+    original_delete = client.delete_collection
+
+    def tracked_delete(name):
+        delete_calls.append(name)
+        return original_delete(name)
+
+    client.delete_collection = tracked_delete
+    store.acquire()
+    try:
+        store.register(GEN_1)
+        store.activate(GEN_1)
+        rows = {
+            name: is_active
+            for name, is_active in store._require_conn()
+            .execute(sa.select(GenerationRow.name, GenerationRow.is_active))
+            .all()
+        }
+        store._require_conn().commit()
+        candidates = store.cleanup_candidates(in_use_grace_seconds=0)
+    finally:
+        store.release()
+
+    assert rows == {LEGACY: False, GEN_1: True}
+    assert candidates == []
+    assert protected_names.isdisjoint(candidates)
+
+    store.acquire()
+    try:
+        removed = cleanup_generations(client, store, in_use_grace_seconds=0)
+    finally:
+        store.release()
+
+    assert removed == []
+    assert delete_calls == []
+    assert set(client.collections) == protected_names | {GEN_1, GEN_2}
 
 
 def test_cleanup_drops_rows_whose_collection_is_already_gone(tmp_path):
