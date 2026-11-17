@@ -8,9 +8,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 COPY ui/requirements.txt /tmp/requirements.txt
+COPY ui/requirements.lock /tmp/requirements.lock
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install -r /tmp/requirements.txt \
-    && rm -f /tmp/requirements.txt \
+    && pip install -r /tmp/requirements.txt -c /tmp/requirements.lock \
+    && rm -f /tmp/requirements.txt /tmp/requirements.lock \
     && find /usr/local/lib/python3.11/site-packages -type d -name __pycache__ -prune -exec rm -rf {} +
 
 WORKDIR /app

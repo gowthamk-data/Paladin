@@ -27,11 +27,12 @@ RUN python -m venv "${VENV_PATH}"
 ENV PATH="${VENV_PATH}/bin:${PATH}"
 
 COPY gateway/requirements.txt /tmp/requirements.txt
+COPY gateway/requirements.lock /tmp/requirements.lock
 # Byte-code caches are wasted bytes in a layer: they are regenerated on first import and can go
 # stale after an upgrade. torch/include is only needed when compiling C++ extensions.
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install -r /tmp/requirements.txt \
-    && rm -f /tmp/requirements.txt \
+    && pip install -r /tmp/requirements.txt -c /tmp/requirements.lock \
+    && rm -f /tmp/requirements.txt /tmp/requirements.lock \
     && find "${VENV_PATH}" -type d -name __pycache__ -prune -exec rm -rf {} + \
     && rm -rf "${VENV_PATH}/lib/python3.11/site-packages/torch/include"
 
