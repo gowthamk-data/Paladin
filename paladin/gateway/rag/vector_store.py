@@ -23,11 +23,8 @@ class VectorStore:
     def __init__(self, db=None, collection_name: str = CHROMA_COLLECTION):
         """Bind to the request's DB session first, collection name second.
 
-        The session is positional-first on purpose: ``query_routes.py`` calls
-        ``VectorStore(db)``, and an earlier signature with ``collection_name``
-        first silently bound the Session as the collection name. Keeping the
-        legacy fallback as an explicit keyword preserves the old behaviour
-        for any non-route caller.
+        The session parameter is positional-first to support VectorStore(db) calls;
+        collection_name is keyword-optional for fallback compatibility.
         """
         import chromadb
 

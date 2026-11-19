@@ -34,7 +34,7 @@ Isolation guarantees:
   * the disposable container removes itself (``--rm``) and the temporary
     wheelhouse is deleted in the runner's cleanup block
 
-Parser contract (Task 2 -- fail closed):
+Parser contract (fail closed):
   * ``parse_test_counts`` separately counts passed / skipped / failed tests.
   * A recognised result summary is parsed exactly: "OK" summaries,
     "OK (skipped=N)", "FAILED (failures=N, errors=N, skipped=N)".
@@ -96,7 +96,7 @@ SCRATCH_TEST_ENV = (
 
 PYTEST_NO_TESTS_COLLECTED_EXIT = 5
 # ---------------------------------------------------------------------------
-# Fail-closed parser (Task 2): shapes recognised by the parser.
+# Fail-closed parser: shapes recognised by the parser.
 # ---------------------------------------------------------------------------
 
 # "Ran 3 tests" / "Ran 3 tests in 0.001s"

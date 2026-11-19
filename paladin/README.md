@@ -149,10 +149,6 @@ paladin/
 └── docker-compose.yml
 ```
 
-## Screenshots
-
-<!-- Screenshot placeholder: add reviewed UI screenshots under docs/images/ before publication. -->
-
 ## Links
 
 - [Ollama `llama3.2:3b` model](https://ollama.com/library/llama3.2:3b)

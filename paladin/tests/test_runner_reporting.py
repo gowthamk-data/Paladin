@@ -51,7 +51,7 @@ PYTEST_TRUNCATED_SUMMARY = "Ran 3 tests in 0.001s\n\nOK (skipped=1"
 PYTEST_MISSING_SUMMARY_UNIT = "Ran 3 tests"
 
 
-# ---- pytest parser cases (Task 2) ------------------------------------------
+# ---- pytest parser cases ----------------------------------------------------
 
 def test_parse_test_counts_full_pass():
     assert parse_test_counts(PYTEST_FULL_PASS, "pytest") == {
@@ -83,7 +83,7 @@ def test_parse_test_counts_missing_summary_fail_closed():
     assert counts == {"passed": 0, "skipped": 0, "failed": 0, "unparseable": 1}
 
 
-# ---- unittest parser cases (Task 2) ------------------------------------------
+# ---- unittest parser cases --------------------------------------------------
 
 def test_parse_unittest_counts_ok():
     assert parse_test_counts(PYTEST_OK_SUMMARY, "unittest") == {

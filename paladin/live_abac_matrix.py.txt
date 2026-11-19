@@ -1,0 +1,57 @@
+import chromadb
+from gateway.authz.policy import UserAttributes, build_chroma_filter
+from gateway.config import CHROMADB_HOST, CHROMADB_PORT, CHROMA_COLLECTION
+from gateway.rag.generations import read_active_generation
+
+users = {
+    "emp1": UserAttributes("Engineering", 1, "employee"),
+    "mgr1": UserAttributes("Engineering", 2, "manager"),
+    "admin1": UserAttributes("Executive", 3, "admin"),
+    "fin1": UserAttributes("Finance", 2, "employee"),
+}
+expected = {
+    "emp1": {"engineering_policy.txt"},
+    "mgr1": {"engineering_policy.txt", "hr_handbook.md"},
+    "admin1": {"executive_briefing.md", "hr_handbook.md"},
+    "fin1": {"finance_guidelines.txt", "hr_handbook.md"},
+}
+
+collection_name = read_active_generation() or CHROMA_COLLECTION
+client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
+collection = client.get_collection(name=collection_name)
+
+all_metadata = collection.get(include=["metadatas"]).get("metadatas") or []
+expected_documents = {
+    "engineering_policy.txt",
+    "finance_guidelines.txt",
+    "executive_briefing.md",
+    "hr_handbook.md",
+}
+present = {m.get("source_document") for m in all_metadata}
+if present != expected_documents:
+    raise SystemExit(
+        f"ABORT: expected all four documents in {collection_name}; "
+        f"found {sorted(present)}"
+    )
+
+failures = 0
+print(f"Active collection: {collection_name}")
+for username, user in users.items():
+    result = collection.get(
+        where=build_chroma_filter(user),
+        include=["metadatas"],
+    )
+    sources = {
+        m.get("source_document")
+        for m in (result.get("metadatas") or [])
+    }
+    for document in sorted(expected_documents):
+        actual = document in sources
+        wanted = document in expected[username]
+        ok = actual == wanted
+        print(f"{'PASS' if ok else 'FAIL'} {username} -> {document}: "
+              f"expected={wanted}, actual={actual}")
+        failures += not ok
+
+print(f"Result: {16 - failures}/16 passed")
+raise SystemExit(1 if failures else 0)

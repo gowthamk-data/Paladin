@@ -173,14 +173,9 @@ def ask(
         )
 
     try:
-        # Constructing the vector store and loading the embedding model are dependency
-        # initializations, and both can fail: `VectorStore()` raises a typed
-        # ServiceUnavailableError when ChromaDB is unreachable, and `get_embedding_model()`
-        # converts a model-load failure into one. They therefore belong *inside* this guard —
-        # previously they ran before it, so a failure at either step skipped the
-        # `_write_llm_error_log` call below and left the already-committed PII rows without a
-        # parent `request_logs` row (the orphan the audit check forbids), and surfaced as a 500
-        # rather than a 503.
+        # Initialize vector store and embedding model inside the try block so any
+        # dependency failure (ServiceUnavailableError) triggers _write_llm_error_log
+        # to prevent orphaned PII audit records.
         # Validate the complete ABAC predicate before touching the model. This is deliberately
         # separate from the vector-store implementation so malformed user attributes fail closed.
         try:

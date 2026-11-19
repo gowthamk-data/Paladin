@@ -247,7 +247,7 @@ def test_vector_store_fails_closed_when_generation_collection_missing(monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# Task 1: real-PostgreSQL concurrency check for lock-first acquire().
+# Real-PostgreSQL concurrency check for lock-first acquire().
 #
 # No real PostgreSQL is reachable in this environment (no compatible DBAPI
 # driver plus no disposable server), so the test is skip-marked rather than
@@ -312,7 +312,7 @@ def _missing_concurrency_prerequisite():
 _real_postgres = pytest.mark.skipif(
     _missing_concurrency_prerequisite() is not None,
     reason=(
-        "Task 1 blocker: disposable PostgreSQL unavailable "
+        "Precondition: disposable PostgreSQL unavailable "
         f"({_missing_concurrency_prerequisite()}); refusing to substitute "
         "SQLite/fakes."
     ),

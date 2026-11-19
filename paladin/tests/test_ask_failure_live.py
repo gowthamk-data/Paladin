@@ -255,10 +255,8 @@ class AskFailurePathTests(unittest.TestCase):
     def test_embedding_model_load_failure_after_pii(self):
         """A model-load failure must be converted to a typed service-unavailable error.
 
-        `get_embedding_model()` previously let import/load exceptions escape
-        untyped, which meant a 500 plus an orphaned PII row. It now raises
-        ServiceUnavailableError("embedding model") and must therefore write the
-        sanitized parent row exactly like the other downstream failures.
+        `get_embedding_model()` raises ServiceUnavailableError("embedding model")
+        and must write the sanitized parent row to prevent orphaned PII audit records.
         """
         if not _GATEWAY_DEPS:
             self.skipTest("gateway dependency chain not installed (run in-container)")

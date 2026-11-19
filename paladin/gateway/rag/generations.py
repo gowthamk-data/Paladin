@@ -37,12 +37,9 @@ INGEST_LOCK_KEY = 0x50414C47  # "PALG"
 
 # Partial unique index enforcing AT MOST ONE active generation. Every row the
 # index contains has ``is_active = true``, so uniqueness on the flag itself
-# admits exactly one active row. The original index was
-# ``UNIQUE (name) WHERE is_active``, which only forbade a *duplicated active
-# name*: two differently-named active rows — the corrupt state that
-# ``read_active_generation`` must reject — slipped straight through.
-# ``GenerationStore._ensure_one_active_index`` drops an index of that older
-# shape and replaces it with this one.
+# admits exactly one active row across all collection names.
+# ``GenerationStore._ensure_one_active_index`` replaces legacy name-based indices
+# with this flag-based index.
 # DDL types are rendered against the PostgreSQL dialect: every type the
 # pointer model uses (VARCHAR(255), BOOLEAN, TIMESTAMP) is valid on both
 # PostgreSQL (production) and SQLite (the isolated tests), while the generic

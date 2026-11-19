@@ -15,8 +15,7 @@ from gateway.routes.metrics_routes import router as metrics_router
 from gateway.routes.query_routes import router as ask_router
 from gateway.security.rate_limiter import limiter
 
-# Without this, LOG_LEVEL was read into config and then ignored, so every deployment logged at
-# whatever level the framework defaulted to.
+# Configure root logger with the specified LOG_LEVEL.
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",

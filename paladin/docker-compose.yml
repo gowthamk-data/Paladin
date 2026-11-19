@@ -99,6 +99,7 @@ services:
     ports: ["8501:8501"]
     environment:
       - API_URL=http://paladin-api:8000
+      - PYTHONPATH=/app
     depends_on:
       paladin-api:
         condition: service_healthy

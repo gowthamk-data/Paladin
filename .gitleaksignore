@@ -1,3 +1,3 @@
 # Gitleaks ignore list for false positives
-# Allowlist candidate Docker image tag references (paladin-paladin-api:<tag>)
-paladin-paladin-api:*
+# Exact false positive: a Docker image tag in the Gate 1 results report.
+454a5bff2877c5e62f129bb6b781196002686495:paladin/docs/recovery/GATE1_RESULTS_2026-11-09.md:generic-api-key:31
